@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aether — Mail · Calendar · Contacts</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- LOGIN SCREEN -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">✉️</div>
+    <div class="login-title">Aether</div>
+    <div class="login-sub">Your all-in-one workspace.</div>
+    <button class="google-btn" id="btn-login">Continue with Google</button>
+    <p class="login-note">Need a Client ID? <a href="#" id="link-setup">Setup guide →</a></p>
+  </div>
+</div>
+
+<!-- SETUP WIZARD -->
+<div id="setup-screen" class="modal-overlay">
+  <div class="setup-card">
+    <div class="setup-steps">
+      <div class="setup-step done"></div><div class="setup-step active" id="step-ind-2"></div><div class="setup-step" id="step-ind-3"></div>
+    </div>
+    <div id="setup-step-1">
+      <h2>Create a Google Cloud Project</h2>
+      <p>Aether needs your own free Google Cloud OAuth Client ID to access your data.</p>
+      <div class="code-block" id="origin-display">Loading...</div>
+      <button class="copy-btn" id="btn-copy-origin">Copy origin</button>
+      <div class="setup-btns"><button class="setup-btn-primary" id="btn-goto-step2">I've created my Client ID →</button></div>
+    </div>
+    <div id="setup-step-2" style="display:none">
+      <h2>Enter your Client ID</h2>
+      <div class="setup-field">
+        <label>OAuth Client ID</label>
+        <input type="text" id="client-id-input" placeholder="xxxxxxxxxxxx.apps.googleusercontent.com">
+      </div>
+      <div class="setup-btns">
+        <button class="btn-cancel" id="btn-close-setup">Back</button>
+        <button class="setup-btn-primary" id="btn-save-client-id">Save &amp; Sign in</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app" style="display:none">
+  <!-- SIDEBAR -->
+  <aside id="sidebar">
+    <div class="logo">
+      <button id="btn-close-sidebar" class="mobile-only">✕</button>
+      <div class="logo-icon">✉️</div> Aether
+    </div>
+    <button class="compose-btn" id="btn-compose"><span>✏️</span> Compose</button>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Mail</div>
+      <div class="nav-item active" data-panel="mail" data-label="INBOX" id="nav-inbox"><span>📥</span> Inbox <span class="badge" id="unread-badge" style="display:none">0</span></div>
+      <div class="nav-item" data-panel="mail" data-label="SENT"><span>📤</span> Sent</div>
+      <div class="nav-item" data-panel="mail" data-label="STARRED"><span>⭐</span> Starred</div>
+      <div class="nav-item" data-panel="mail" data-label="DRAFT"><span>📝</span> Drafts</div>
+      <div class="nav-item" data-panel="mail" data-label="SPAM"><span>🚫</span> Spam</div>
+      <div class="nav-item" data-panel="mail" data-label="TRASH"><span>🗑️</span> Trash</div>
+    </div>
+    <hr class="sidebar-divider">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Workspace</div>
+      <div class="nav-item" data-panel="calendar" id="nav-calendar"><span>📅</span> Calendar</div>
+      <div class="nav-item" data-panel="contacts" id="nav-contacts"><span>👥</span> Contacts</div>
+    </div>
+
+    <div class="user-info">
+      <div class="avatar" id="user-avatar">?</div>
+      <div>
+        <div class="user-name" id="user-name">Loading…</div>
+        <div class="user-email" id="user-email">…</div>
+      </div>
+      <button class="sign-out-btn" id="btn-sign-out" title="Sign out">⏻</button>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main id="main">
+    <div id="topbar">
+      <button id="btn-open-sidebar" class="mobile-only">☰</button>
+      <div class="search-wrap">
+        <span class="search-icon">🔍</span>
+        <input type="text" id="search-input" placeholder="Search current view...">
+      </div>
+      <div class="topbar-actions">
+        <div id="session-timer"><span style="color:var(--text2); display:flex; align-items:center;">version 1.6 &nbsp;|&nbsp;</span> ⏱ <span id="timer-text" style="margin-left:4px;">--:--</span></div>
+        <button class="icon-btn" id="btn-refresh" title="Refresh">↻</button>
+      </div>
+    </div>
+
+    <div id="content">
+      <!-- MAIL PANEL -->
+      <div class="panel active" id="panel-mail">
+        <div id="email-list-panel" class="list-pane">
+          <div class="list-header"><h2 id="list-label">Inbox</h2></div>
+          <div id="email-list" class="list-scroll"></div>
+          <button id="btn-load-more-mail" class="load-more-btn" style="display:none">Load More</button>
+        </div>
+        <div id="email-detail-panel" class="detail-pane">
+          <div class="mobile-header mobile-only"><button class="btn-back-to-list">← Back to List</button></div>
+          <div class="detail-empty" id="detail-empty">Select an item to view</div>
+          <div id="email-viewer" class="email-viewer" style="display:none"></div>
+          <div id="email-action-bar" class="email-action-bar" style="display:none"></div>
+          <div id="reply-section" class="reply-section" style="display:none">
+            <div class="reply-toggle" id="btn-toggle-reply"><span id="reply-arrow">▶</span> Reply</div>
+            <div class="reply-editor" id="reply-editor">
+              <div class="compose-field"><label>To</label><input type="text" id="reply-to" class="autocomplete-input"></div>
+              <div class="compose-field"><label>Subj</label><input type="text" id="reply-subject"></div>
+              <div id="reply-body" class="rich-editor" contenteditable="true" placeholder="Write your reply... (Drag & Drop images here)"></div>
+              <div class="attached-files" id="reply-attached-files-list"></div>
+              <div class="reply-editor-footer">
+                <label class="attach-btn" for="reply-attach-input">📎 Attach</label>
+                <input type="file" id="reply-attach-input" multiple style="display:none;">
+                <button class="action-btn primary" id="btn-send-reply">Send Reply</button>
+                <button class="action-btn" id="btn-cancel-reply">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CALENDAR PANEL -->
+      <div class="panel" id="panel-calendar">
+        <div id="calendar-view">
+          <div class="cal-header">
+            <div class="cal-nav">
+              <button id="btn-cal-prev">‹</button>
+              <button id="btn-cal-next">›</button>
+            </div>
+            <div class="cal-month-title" id="cal-title">Month Year</div>
+            <button class="cal-today-btn" id="btn-cal-today">Today</button>
+            <button class="new-event-btn" id="btn-new-event">+ New Event</button>
+          </div>
+          <div class="cal-grid-wrap">
+            <div class="cal-weekdays" id="cal-weekdays"></div>
+            <div class="cal-days" id="cal-days"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CONTACTS PANEL -->
+      <div class="panel" id="panel-contacts">
+        <div id="contacts-list-panel" class="list-pane">
+          <div class="list-header"><input type="text" id="contact-search" placeholder="Filter contacts…" style="width:100%; background:none; border:none; color:var(--text); outline:none;"></div>
+          <div id="contacts-list" class="list-scroll"></div>
+          <button id="btn-load-more-contacts" class="load-more-btn" style="display:none">Load More</button>
+        </div>
+        <div id="contact-detail-panel" class="detail-pane">
+          <div class="mobile-header mobile-only"><button class="btn-back-to-list">← Back to List</button></div>
+          <div class="detail-empty" id="contact-detail-empty">Select a contact</div>
+          <div id="contact-viewer" class="contact-viewer" style="display:none"></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- COMPOSE/FORWARD MODAL -->
+<div id="compose-modal" class="modal-overlay">
+  <div class="compose-window">
+    <div class="compose-title-bar"><span id="compose-title">New Message</span> <button id="btn-close-compose">✕</button></div>
+    <div class="compose-field"><label>To</label><input type="text" id="compose-to" class="autocomplete-input" placeholder="Recipients"></div>
+    <div class="compose-field"><label>Cc</label><input type="text" id="compose-cc" class="autocomplete-input"></div>
+    <div class="compose-field"><label>Subj</label><input type="text" id="compose-subject" placeholder="Subject"></div>
+    <div class="compose-body"><div id="compose-body-text" class="rich-editor" contenteditable="true" placeholder="Write your message... (Drag & Drop images here)"></div></div>
+    <div class="attached-files" id="attached-files-list"></div>
+    <div class="compose-footer">
+      <label class="attach-btn" for="compose-attach-input">📎 Attach</label>
+      <input type="file" id="compose-attach-input" multiple style="display:none;">
+      <button class="send-btn" id="btn-send-email">Send ↑</button>
+    </div>
+  </div>
+</div>
+
+<!-- EVENT MODAL -->
+<div id="event-modal" class="modal-overlay" style="z-index: 250;">
+  <div class="modal-window">
+    <div class="modal-header"><span id="event-modal-title">New Event</span><button id="btn-close-event">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label>Title</label><input type="text" id="event-title"></div>
+      <div class="form-group"><label>Calendar</label><select id="event-calendar"></select></div>
+      <div class="form-row">
+        <div class="form-group"><label>Start</label><input type="datetime-local" id="event-start"></div>
+        <div class="form-group"><label>End</label><input type="datetime-local" id="event-end"></div>
+      </div>
+      <div class="form-group"><label>Location</label><input type="text" id="event-location"></div>
+      <div class="form-group"><label>Description</label><textarea id="event-desc" rows="3"></textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" id="btn-cancel-event">Cancel</button>
+      <button class="btn-save" id="btn-save-event">Save Event</button>
+    </div>
+  </div>
+</div>
+
+<!-- CONTACT EDIT MODAL -->
+<div id="contact-modal" class="modal-overlay" style="z-index: 300;">
+  <div class="modal-window">
+    <div class="modal-header"><span>Edit Contact</span><button id="btn-close-contact">✕</button></div>
+    <div class="modal-body">
+      <input type="hidden" id="contact-rn"><input type="hidden" id="contact-etag">
+      <div class="form-row">
+        <div class="form-group"><label>First Name</label><input type="text" id="contact-edit-first-name"></div>
+        <div class="form-group"><label>Last Name</label><input type="text" id="contact-edit-last-name"></div>
+      </div>
+      <div class="form-group"><label>Email</label><input type="email" id="contact-edit-email"></div>
+      <div class="form-group"><label>Phone</label><input type="text" id="contact-edit-phone"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" id="btn-cancel-contact">Cancel</button>
+      <button class="btn-save" id="btn-save-contact">Save Contact</button>
+    </div>
+  </div>
+</div>
+
+<!-- DELETE/ACTION CONFIRMATION MODAL -->
+<div id="confirm-modal" class="modal-overlay" style="z-index: 400;">
+  <div class="modal-window" style="width: 340px;">
+    <div class="modal-header"><span id="confirm-title" style="color: var(--text);">Confirm Action</span></div>
+    <div class="modal-body"><p id="confirm-msg" style="font-size: 14px; color: var(--text);"></p></div>
+    <div class="modal-footer">
+      <button class="btn-cancel" id="btn-confirm-no">Cancel</button>
+      <button class="btn-save" id="btn-confirm-yes" style="background: var(--accent);">Yes, Proceed</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast-container"></div>
+
+<script type="module" src="api.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
