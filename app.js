@@ -7,7 +7,7 @@ function el(tag, className = '', textContent = '', attributes = {}) {
   const e = document.createElement(tag);
   if (className) e.className = className;
   if (textContent) e.textContent = textContent;
-  for (const[key, val] of Object.entries(attributes)) {
+  for (const [key, val] of Object.entries(attributes)) {
     if (key === 'style') e.style.cssText = val;
     else if (key.startsWith('data-')) e.setAttribute(key, val);
     else e[key] = val;
@@ -48,7 +48,6 @@ function confirmAction(title, msg, confirmBtnLabel, onConfirm, isDestructive = f
   btnYes.onclick = () => { confirmModal.classList.remove('open'); onConfirm(); };
 }
 
-// ===== UTILS =====
 const formatBytes = b => b < 1024 ? b+'B' : b < 1048576 ? (b/1024).toFixed(1)+'KB' : (b/1048576).toFixed(1)+'MB';
 
 const formatTimestamp = (dateStr) => {
@@ -100,10 +99,27 @@ function utf8ToBase64url(str) {
 }
 
 function encodeSubject(str) {
+  if (!str) return '';
   const bytes = new TextEncoder().encode(str);
   let bin = '';
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return `=?UTF-8?B?${btoa(bin)}?=`;
+}
+
+function encodeAddressList(str) {
+  if (!str) return '';
+  return str.split(/[,;]/).map(part => {
+    const match = part.match(/^(.*?)<(.+?)>$/);
+    if (match) {
+      let name = match[1].trim().replace(/^"|"$/g, '').trim();
+      let email = match[2].trim();
+      if (/[^\x00-\x7F]/.test(name)) name = encodeSubject(name);
+      else if (name) name = `"${name}"`;
+      return name ? `${name} <${email}>` : `<${email}>`;
+    }
+    if (/[^\x00-\x7F]/.test(part)) return encodeSubject(part);
+    return part.trim();
+  }).filter(Boolean).join(', ');
 }
 
 const decodeB64 = str => {
@@ -208,7 +224,12 @@ function setupEventListeners() {
   document.getElementById('btn-send-email').addEventListener('click', () => confirmAction('Send Message', 'Are you ready to send this message?', 'Send', sendEmail));
   
   document.getElementById('btn-toggle-reply').addEventListener('click', toggleReply);
-  document.getElementById('btn-cancel-reply').addEventListener('click', toggleReply);
+  document.getElementById('btn-cancel-reply').addEventListener('click', () => {
+    document.getElementById('reply-editor').classList.remove('open');
+    document.getElementById('reply-arrow').textContent = '▶';
+    document.getElementById('reply-body').innerHTML = ''; 
+    State.reply.attachments =[];
+  });
   document.getElementById('btn-send-reply').addEventListener('click', () => confirmAction('Send Reply', 'Are you sure you want to send this reply?', 'Send', sendReply));
 
   document.getElementById('compose-attach-input').addEventListener('change', (e) => handleAttachFiles(e, 'compose'));
@@ -234,7 +255,6 @@ function setupEventListeners() {
   document.querySelectorAll('.autocomplete-input').forEach(input => attachAutocomplete(input));
 }
 
-// ===== RICH TEXT MEDIA =====
 function handleRichTextMedia(e) {
   let files =[];
   if (e.type === 'paste' && e.clipboardData.files.length > 0) { e.preventDefault(); files = Array.from(e.clipboardData.files); } 
@@ -304,7 +324,7 @@ function attachAutocomplete(input) {
 
   function insertMatch(matchStr) {
     let parts = input.value.split(';').map(s => s.trim());
-    parts.pop(); // Remove the partial typed snippet
+    parts.pop(); 
     parts.push(matchStr);
     input.value = parts.filter(Boolean).join('; ') + '; ';
     popup.style.display = 'none';
@@ -342,7 +362,6 @@ function attachAutocomplete(input) {
   input.addEventListener('blur', () => popup.style.display = 'none');
 }
 
-// ===== SESSION & LOGOUT =====
 function startSessionTimer() {
   clearInterval(State.timerInterval);
   State.timerInterval = setInterval(() => {
@@ -357,7 +376,6 @@ function startSessionTimer() {
 }
 
 async function handleSignOut() {
-  // Secure revocation to Google Servers
   if (State.token) {
     try {
       await fetch(`https://oauth2.googleapis.com/revoke?token=${State.token}`, {
@@ -409,7 +427,6 @@ function refreshCurrent() {
   if(active) showPanel(active.dataset.panel, active.dataset.label);
 }
 
-// ===== MAIL MODULE =====
 async function loadEmails(label, loadMore = false) {
   if (State.mail.isFetching) return;
   State.mail.isFetching = true;
@@ -474,15 +491,19 @@ function renderEmailList(msgs, clearFirst) {
     (m.payload?.headers ||[]).forEach(h => headers[h.name] = h.value);
     const isUnread = m.labelIds && m.labelIds.includes('UNREAD');
     
-    const fromStr = decodeRFC2047(headers['From'] || 'Unknown');
-    const toStr = decodeRFC2047(headers['To'] || 'Unknown');
+    const fromStr = decodeEntities(decodeRFC2047(headers['From'] || 'Unknown'));
+    const toStr = decodeEntities(decodeRFC2047(headers['To'] || 'Unknown'));
     let displayUser = State.mail.label === 'SENT' ? 'To: ' + (toStr.replace(/<.*>/, '').trim() || toStr) : fromStr.replace(/<.*>/, '').trim() || fromStr;
     const ts = formatTimestamp(headers['Date']);
 
     const div = el('div', `email-item ${isUnread ? 'unread' : ''}`);
     const metaObj = el('div', 'email-meta');
     metaObj.append(el('span', 'email-from', displayUser), el('span', 'email-date', ts));
-    div.append(metaObj, el('div', 'email-subject', decodeRFC2047(headers['Subject']) || '(no subject)'), el('div', 'email-snippet', decodeRFC2047(m.snippet) || ''));
+    
+    const subj = decodeEntities(decodeRFC2047(headers['Subject']) || '(no subject)');
+    const snip = decodeEntities(decodeRFC2047(m.snippet) || '');
+    
+    div.append(metaObj, el('div', 'email-subject', subj), el('div', 'email-snippet', snip));
     div.addEventListener('click', () => openEmail(m, div));
     container.appendChild(div);
   });
@@ -500,7 +521,10 @@ async function openEmail(msgMeta, elNode) {
   document.getElementById('email-action-bar').style.display = 'none';
   document.getElementById('reply-section').style.display = 'none';
   
-  if (document.getElementById('reply-editor').classList.contains('open')) toggleReply();
+  if (document.getElementById('reply-editor').classList.contains('open')) {
+    document.getElementById('reply-editor').classList.remove('open');
+    document.getElementById('reply-arrow').textContent = '▶';
+  }
   
   loadingState(document.getElementById('email-viewer'));
 
@@ -563,8 +587,8 @@ async function renderEmail(msg) {
   
   headerSec.append(
     el('div', 'email-title', decodeEntities(headers['Subject']) || '(no subject)'),
-    buildMetaRow('From', headers['From'] || 'Unknown'),
-    buildMetaRow('To', headers['To'] || ''),
+    buildMetaRow('From', decodeEntities(headers['From'] || 'Unknown')),
+    buildMetaRow('To', decodeEntities(headers['To'] || '')),
     buildMetaRow(dateLabel, formatTimestamp(headers['Date']))
   );
 
@@ -583,6 +607,20 @@ async function renderEmail(msg) {
       } catch (e) { }
     }
   }
+
+  let cleanHtml = htmlData;
+  if (bodyObj.type === 'text/plain') {
+    htmlData = escHtml(htmlData).replace(/\r?\n/g, '<br>');
+    cleanHtml = htmlData;
+  } else {
+    const bodyMatch = htmlData.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+    if (bodyMatch) cleanHtml = bodyMatch[1];
+  }
+
+  // Save parsed history for the Reply generator
+  State.reply.originalHtml = cleanHtml;
+  State.reply.originalFrom = decodeEntities(headers['From'] || 'Unknown');
+  State.reply.originalDate = headers['Date'] || '';
 
   const bodyContainer = el('div', 'email-body');
   if (bodyObj.type === 'text/html') {
@@ -624,7 +662,10 @@ async function renderEmail(msg) {
   actionBar.innerHTML = '';
   
   const btnReply = el('button', 'action-btn primary', '↩ Reply');
-  btnReply.onclick = toggleReply;
+  btnReply.onclick = () => {
+    const replyEd = document.getElementById('reply-editor');
+    if (!replyEd.classList.contains('open')) toggleReply();
+  };
   
   const btnFwd = el('button', 'action-btn', '↗ Forward');
   btnFwd.onclick = () => confirmAction('Forward Message', 'Would you like to forward this message?', 'Forward', async () => {
@@ -643,20 +684,12 @@ async function renderEmail(msg) {
       } catch(e) { toast('Error loading some attachments', 'error'); }
     }
 
-    let cleanHtml = htmlData;
-    if (bodyObj.type === 'text/plain') {
-      cleanHtml = escHtml(cleanHtml).replace(/\r?\n/g, '<br>');
-    } else {
-      const bodyMatch = cleanHtml.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-      if (bodyMatch) cleanHtml = bodyMatch[1];
-    }
-
     const fwdHeader = `<br><br><div style="font-family: var(--font); padding-left: 8px; border-left: 2px solid var(--border); margin-left: 4px; color: var(--text2);">
       ---------- Forwarded message ---------<br>
-      <b>From:</b> ${escHtml(headers['From'] || '')}<br>
-      <b>Date:</b> ${escHtml(headers['Date'] || '')}<br>
+      <b>From:</b> ${escHtml(State.reply.originalFrom)}<br>
+      <b>Date:</b> ${escHtml(State.reply.originalDate)}<br>
       <b>Subject:</b> ${escHtml(decodeEntities(headers['Subject']) || '')}<br>
-      <b>To:</b> ${escHtml(headers['To'] || '')}<br>
+      <b>To:</b> ${escHtml(decodeEntities(headers['To'] || ''))}<br>
     </div><br>`;
 
     const bodyStr = fwdHeader + cleanHtml;
@@ -734,7 +767,8 @@ async function downloadAttachment(msgId, attId, filename) {
 let replyOpen = false;
 function toggleReply() {
   replyOpen = !replyOpen;
-  document.getElementById('reply-editor').classList.toggle('open', replyOpen);
+  const replyEd = document.getElementById('reply-editor');
+  replyEd.classList.toggle('open', replyOpen);
   document.getElementById('reply-arrow').textContent = replyOpen ? '▼' : '▶';
   
   if (replyOpen) {
@@ -748,7 +782,26 @@ function toggleReply() {
     document.getElementById('reply-subject').value = subj.startsWith('Re:') ? subj : 'Re: ' + subj;
     State.reply.attachments =[];
     renderAttachmentChips('reply');
-    document.getElementById('reply-body').focus();
+    
+    // Inject the perfectly formatted Reply History block
+    const historyHtml = `<br><br><div class="gmail_quote">On ${formatTimestamp(State.reply.originalDate)}, ${escHtml(State.reply.originalFrom)} wrote:<br><blockquote style="margin:0 0 0 .8ex;border-left:1px #ccc solid;padding-left:1ex">${State.reply.originalHtml}</blockquote></div>`;
+    const replyBody = document.getElementById('reply-body');
+    replyBody.innerHTML = `<div><br></div>${historyHtml}`;
+    
+    replyBody.focus();
+    
+    // Auto-scroll cursor to top of the editable div
+    try {
+      const range = document.createRange();
+      const sel = window.getSelection();
+      range.setStart(replyBody.firstChild, 0);
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch(e) {}
+
+  } else {
+    document.getElementById('reply-body').innerHTML = '';
   }
 }
 
@@ -760,8 +813,9 @@ async function sendReply() {
 
   try {
     await sendRawEmail(to, '', subj, body, State.reply.attachments, State.compose.currentThreadId);
-    document.getElementById('reply-body').innerHTML = '';
-    toggleReply();
+    document.getElementById('reply-editor').classList.remove('open');
+    document.getElementById('reply-arrow').textContent = '▶';
+    document.getElementById('reply-body').innerHTML = ''; 
     toast('Reply sent!', 'success');
     refreshCurrent();
   } catch (e) { toast('Failed to send reply: ' + e.message, 'error'); }
@@ -818,8 +872,8 @@ async function sendRawEmail(to, cc, subject, htmlBody, attachments, threadId) {
   const boundaryMixed = 'aether_mixed_' + Math.random().toString(36).substr(2);
   const boundaryRel = 'aether_rel_' + Math.random().toString(36).substr(2);
   
-  let emailStr = `To: ${to}\r\n`;
-  if (cc) emailStr += `Cc: ${cc}\r\n`;
+  let emailStr = `To: ${encodeAddressList(to)}\r\n`;
+  if (cc) emailStr += `Cc: ${encodeAddressList(cc)}\r\n`;
   emailStr += `Subject: ${encodeSubject(subject)}\r\n`;
   emailStr += `MIME-Version: 1.0\r\n`;
 

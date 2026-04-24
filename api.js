@@ -17,15 +17,13 @@ export const State = {
   contacts: { items:[], pageToken: null },
   calendar: { date: new Date(), events:[], calendars:[], editingCalendarId: null },
   compose: { attachments:[], currentEmailId: null, currentThreadId: null },
-  reply: { attachments:[] }
+  reply: { attachments:[], originalHtml: '', originalFrom: '', originalDate: '' }
 };
 
 export const Auth = {
-  // Client ID is safely kept in localStorage so you don't have to retype it
   getClientId: () => localStorage.getItem('aether_client_id') || '',
   setClientId: (id) => localStorage.setItem('aether_client_id', id),
   
-  // Token strictly kept in sessionStorage so it gets destroyed upon Tab Close
   getToken: () => sessionStorage.getItem('aether_token'),
   setToken: (t, exp) => { sessionStorage.setItem('aether_token', t); sessionStorage.setItem('aether_token_exp', exp); },
   getTokenExp: () => parseInt(sessionStorage.getItem('aether_token_exp') || '0'),

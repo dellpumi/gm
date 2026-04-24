@@ -10,7 +10,6 @@
 </head>
 <body>
 
-<!-- LOGIN SCREEN -->
 <div id="login-screen">
   <div class="login-card">
     <div class="login-logo">✉️</div>
@@ -21,7 +20,6 @@
   </div>
 </div>
 
-<!-- SETUP WIZARD -->
 <div id="setup-screen" class="modal-overlay">
   <div class="setup-card">
     <div class="setup-steps">
@@ -48,9 +46,7 @@
   </div>
 </div>
 
-<!-- MAIN APP -->
 <div id="app" style="display:none">
-  <!-- SIDEBAR -->
   <aside id="sidebar">
     <div class="logo">
       <button id="btn-close-sidebar" class="mobile-only">✕</button>
@@ -84,7 +80,6 @@
     </div>
   </aside>
 
-  <!-- MAIN -->
   <main id="main">
     <div id="topbar">
       <button id="btn-open-sidebar" class="mobile-only">☰</button>
@@ -93,13 +88,12 @@
         <input type="text" id="search-input" placeholder="Search current view...">
       </div>
       <div class="topbar-actions">
-        <div id="session-timer"><span style="color:var(--text2); display:flex; align-items:center;">version 1.6 &nbsp;|&nbsp;</span> ⏱ <span id="timer-text" style="margin-left:4px;">--:--</span></div>
+        <div id="session-timer"><span style="color:var(--text2); display:flex; align-items:center;">version 1.8 - 2026.04.24 &nbsp;|&nbsp;</span> ⏱ <span id="timer-text" style="margin-left:4px;">--:--</span></div>
         <button class="icon-btn" id="btn-refresh" title="Refresh">↻</button>
       </div>
     </div>
 
     <div id="content">
-      <!-- MAIL PANEL -->
       <div class="panel active" id="panel-mail">
         <div id="email-list-panel" class="list-pane">
           <div class="list-header"><h2 id="list-label">Inbox</h2></div>
@@ -129,7 +123,6 @@
         </div>
       </div>
 
-      <!-- CALENDAR PANEL -->
       <div class="panel" id="panel-calendar">
         <div id="calendar-view">
           <div class="cal-header">
@@ -148,7 +141,6 @@
         </div>
       </div>
 
-      <!-- CONTACTS PANEL -->
       <div class="panel" id="panel-contacts">
         <div id="contacts-list-panel" class="list-pane">
           <div class="list-header"><input type="text" id="contact-search" placeholder="Filter contacts…" style="width:100%; background:none; border:none; color:var(--text); outline:none;"></div>
@@ -165,7 +157,6 @@
   </main>
 </div>
 
-<!-- COMPOSE/FORWARD MODAL -->
 <div id="compose-modal" class="modal-overlay">
   <div class="compose-window">
     <div class="compose-title-bar"><span id="compose-title">New Message</span> <button id="btn-close-compose">✕</button></div>
@@ -182,7 +173,6 @@
   </div>
 </div>
 
-<!-- EVENT MODAL -->
 <div id="event-modal" class="modal-overlay" style="z-index: 250;">
   <div class="modal-window">
     <div class="modal-header"><span id="event-modal-title">New Event</span><button id="btn-close-event">✕</button></div>
@@ -203,7 +193,6 @@
   </div>
 </div>
 
-<!-- CONTACT EDIT MODAL -->
 <div id="contact-modal" class="modal-overlay" style="z-index: 300;">
   <div class="modal-window">
     <div class="modal-header"><span>Edit Contact</span><button id="btn-close-contact">✕</button></div>
@@ -223,7 +212,6 @@
   </div>
 </div>
 
-<!-- DELETE/ACTION CONFIRMATION MODAL -->
 <div id="confirm-modal" class="modal-overlay" style="z-index: 400;">
   <div class="modal-window" style="width: 340px;">
     <div class="modal-header"><span id="confirm-title" style="color: var(--text);">Confirm Action</span></div>
