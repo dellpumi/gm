@@ -1,3 +1,4 @@
+// app.js - UI Logic, DOM Manipulation, and Event Binding
 import { State, Auth, gapi } from './api.js';
 
 const escHtml = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
