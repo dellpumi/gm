@@ -58,22 +58,41 @@ const formatTimestamp = (dateStr) => {
   return `${d.getFullYear().toString().slice(-2)}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-// Safely pad Google's URL-safe Base64 to prevent atob() DOM exceptions for binary files
+// STRIP all whitespace/newlines, then pad Base64. Critical for preventing DOMExceptions!
 const padB64 = str => {
-  let b64 = (str || '').replace(/-/g, '+').replace(/_/g, '/');
+  let b64 = (str || '').replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
   while (b64.length % 4) b64 += '=';
   return b64;
 };
 
+// Smart thumbnail icon selector based on MIME/Extension
+function getFileIcon(mime, filename) {
+  if (!mime) mime = '';
+  mime = mime.toLowerCase();
+  const ext = (filename || '').split('.').pop().toLowerCase();
+  
+  if (mime.includes('pdf') || ext === 'pdf') return '📕';
+  if (mime.includes('spreadsheet') || mime.includes('excel') || mime.includes('csv') || ['xls','xlsx','csv'].includes(ext)) return '📊';
+  if (mime.includes('word') || mime.includes('document') ||['doc','docx','rtf'].includes(ext)) return '📘';
+  if (mime.includes('presentation') || mime.includes('powerpoint') || ['ppt','pptx'].includes(ext)) return '📙';
+  if (mime.startsWith('video/') || ['mp4','avi','mov','mkv','webm'].includes(ext)) return '🎬';
+  if (mime.startsWith('audio/') ||['mp3','wav','ogg','m4a'].includes(ext)) return '🎵';
+  if (mime.includes('zip') || mime.includes('tar') || mime.includes('rar') || mime.includes('7z') ||['zip','rar','tar','gz','7z'].includes(ext)) return '📦';
+  if (mime.includes('javascript') || mime.includes('json') || mime.includes('xml') ||['js','json','html','css','xml'].includes(ext)) return '💻';
+  if (mime.startsWith('text/') || ext === 'txt') return '📄';
+  if (mime.startsWith('image/')) return '🖼️'; 
+  return '📁'; 
+}
+
 function decodeRFC2047(str) {
   if (!str) return '';
-  return str.replace(/=\?([a-zA-Z0-9\-]+)\?([bBqQ])\?([^\?]+)\?=/g, (match, charset, encoding, data) => {
+  return str.replace(/=\?([a-zA-Z0-9\-]+)\?([bBqQ])\?([^\?]+)\?=/gi, (match, charset, encoding, data) => {
     try {
+      let bytes;
       if (encoding.toUpperCase() === 'B') {
         const bin = atob(padB64(data));
-        const bytes = new Uint8Array(bin.length);
+        bytes = new Uint8Array(bin.length);
         for (let i=0; i<bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        return new TextDecoder(charset.toLowerCase()).decode(bytes);
       } else if (encoding.toUpperCase() === 'Q') {
         const decodedBytes =[];
         const qData = data.replace(/_/g, ' ');
@@ -81,9 +100,19 @@ function decodeRFC2047(str) {
           if (qData[i] === '=' && i + 2 < qData.length) {
             decodedBytes.push(parseInt(qData.substring(i + 1, i + 3), 16));
             i += 2;
-          } else { decodedBytes.push(qData.charCodeAt(i)); }
+          } else { 
+            decodedBytes.push(qData.charCodeAt(i)); 
+          }
         }
-        return new TextDecoder(charset.toLowerCase()).decode(new Uint8Array(decodedBytes));
+        bytes = new Uint8Array(decodedBytes);
+      }
+      
+      if (bytes) {
+        try {
+          return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        } catch (e) {
+          return new TextDecoder(charset.toLowerCase() || 'utf-8').decode(bytes);
+        }
       }
     } catch (e) { return match; }
     return match;
@@ -115,22 +144,23 @@ function utf8ToBase64(str) {
 
 function encodeSubject(str) {
   if (!str) return '';
-  const bytes = new TextEncoder().encode(str);
-  let bin = '';
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return `=?UTF-8?B?${btoa(bin)}?=`;
+  return `=?UTF-8?B?${utf8ToBase64(str)}?=`;
 }
 
+// Safely split base64 strings WITHOUT trailing newlines breaking the boundary
 function chunkString(str, len = 76) {
-  let res = '';
-  for (let i = 0; i < str.length; i += len) { res += str.slice(i, i + len) + '\r\n'; }
-  return res;
+  const chunks =[];
+  for (let i = 0; i < str.length; i += len) { chunks.push(str.slice(i, i + len)); }
+  return chunks.join('\r\n');
 }
 
-function encodeFilename(str) {
-  if (!str) return '""';
-  if (!/[^\x00-\x7F]/.test(str)) return `"${str}"`;
-  return encodeSubject(str); 
+function getMimeFilenameParams(filename) {
+  const isAscii = !/[^\x00-\x7F]/.test(filename);
+  const encoded = isAscii ? `"${filename}"` : encodeSubject(filename);
+  return {
+    nameStr: `name=${encoded}`,
+    filenameStr: `filename=${encoded}`
+  };
 }
 
 function encodeAddressList(str) {
@@ -148,24 +178,6 @@ function encodeAddressList(str) {
     return part.trim();
   }).filter(Boolean).join(', ');
 }
-
-const decodeB64 = str => {
-  try {
-    const bin = atob(padB64(str));
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return new TextDecoder('utf-8').decode(bytes);
-  } catch (e) { return ''; }
-};
-
-const linkify = (text) => {
-  const frag = document.createDocumentFragment();
-  text.split(/(https?:\/\/[^\s<>"]+)/g).forEach(part => {
-    if (part.startsWith('http')) frag.appendChild(el('a', '', part, { href: part, target: '_blank', rel: 'noopener' }));
-    else frag.appendChild(document.createTextNode(part));
-  });
-  return frag;
-};
 
 // ===== CORE INITIALIZATION =====
 document.addEventListener('DOMContentLoaded', async () => {
@@ -307,7 +319,7 @@ function handleRichTextMedia(e) {
 async function loadAllContactsForAutocomplete() {
   try {
     const data = await gapi('GET', `https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses&pageSize=1000`);
-    State.allContacts = (data.connections ||[]).map(c => {
+    State.allContacts = (data.connections || []).map(c => {
       return { name: c.names?.[0]?.displayName || '', email: c.emailAddresses?.[0]?.value || '' };
     }).filter(c => c.email !== '');
   } catch(e) {}
@@ -486,7 +498,7 @@ async function loadEmails(label, loadMore = false) {
       gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`)
     ));
 
-    State.mail.items =[...State.mail.items, ...newMsgs];
+    State.mail.items = [...State.mail.items, ...newMsgs];
     renderEmailList(newMsgs, !loadMore);
     if (State.mail.pageToken) btnMore.style.display = 'block';
 
@@ -512,7 +524,7 @@ function renderEmailList(msgs, clearFirst) {
 
   msgs.forEach(m => {
     const headers = {};
-    (m.payload?.headers ||[]).forEach(h => headers[h.name] = h.value);
+    (m.payload?.headers || []).forEach(h => headers[h.name] = h.value);
     const isUnread = m.labelIds && m.labelIds.includes('UNREAD');
     
     const fromStr = decodeEntities(decodeRFC2047(headers['From'] || 'Unknown'));
@@ -575,13 +587,12 @@ function getEmailHtml(payload) {
 
 // Deep, strict inspection to pull out ALL binary format attachments reliably
 function getAttachmentsAndInlines(payload) {
-  const atts = [];
+  const atts =[];
   const inlines =[];
 
   function walk(part) {
     if (!part) return;
 
-    // Multipart containers aren't files themselves, keep walking inside them.
     if (part.mimeType && part.mimeType.startsWith('multipart/')) {
       (part.parts ||[]).forEach(walk);
       return;
@@ -594,36 +605,30 @@ function getAttachmentsAndInlines(payload) {
     const cidHeader = headers.find(h => h.name.toLowerCase() === 'content-id');
     const typeHeader = headers.find(h => h.name.toLowerCase() === 'content-type');
 
-    // --- Filename extraction (order matters: most specific first) ---
-    // 1. RFC 5987 extended parameter (filename*=UTF-8''...) in Content-Disposition
     if (!filename && dispHeader) {
       const match = dispHeader.value.match(/filename\*\s*=\s*[^']+'[^']*'([^;\s]+)/i);
       if (match) filename = decodeURIComponent(match[1]);
     }
-    // 2. Quoted or unquoted filename= in Content-Disposition
     if (!filename && dispHeader) {
       const match = dispHeader.value.match(/filename\s*=\s*"?([^";]+)"?/i);
       if (match) filename = match[1].trim();
     }
-    // 3. RFC 5987 extended parameter (name*=UTF-8''...) in Content-Type
     if (!filename && typeHeader) {
       const match = typeHeader.value.match(/name\*\s*=\s*[^']+'[^']*'([^;\s]+)/i);
       if (match) filename = decodeURIComponent(match[1]);
     }
-    // 4. Quoted or unquoted name= in Content-Type
     if (!filename && typeHeader) {
       const match = typeHeader.value.match(/name\s*=\s*"?([^";]+)"?/i);
       if (match) filename = match[1].trim();
     }
 
     const hasAttachmentId = !!part.body?.attachmentId;
-    const hasInlineData   = !!part.body?.data;
     const isExplicitAttachment = dispHeader && dispHeader.value.toLowerCase().startsWith('attachment');
     const isInline = cidHeader || (dispHeader && dispHeader.value.toLowerCase().startsWith('inline'));
 
-    // An email message body is strictly text/plain or text/html AND has no file-like traits
+    // Critical fix: do not use !hasInlineData here, email body DOES have inline data!
     const isTextOrHtml = part.mimeType === 'text/plain' || part.mimeType === 'text/html';
-    const isBodyContainer = isTextOrHtml && !filename && !hasAttachmentId && !hasInlineData && !isExplicitAttachment;
+    const isBodyContainer = isTextOrHtml && !filename && !hasAttachmentId && !isExplicitAttachment;
 
     if (!isBodyContainer) {
       filename = filename ? decodeRFC2047(filename).replace(/(^"|"$)/g, '').trim() : 'Unnamed_File';
@@ -636,7 +641,7 @@ function getAttachmentsAndInlines(payload) {
           mime: part.mimeType,
           filename: filename
         });
-      } else if (filename || hasAttachmentId || hasInlineData || isExplicitAttachment) {
+      } else if (filename || hasAttachmentId || isExplicitAttachment) {
         atts.push({
           filename: filename,
           attachmentId: part.body?.attachmentId,
@@ -659,7 +664,7 @@ async function renderEmail(msg) {
   viewer.innerHTML = ''; 
   
   const headers = {};
-  (msg.payload?.headers ||[]).forEach(h => headers[h.name] = decodeRFC2047(h.value));
+  (msg.payload?.headers || []).forEach(h => headers[h.name] = decodeRFC2047(h.value));
 
   const headerSec = el('div', 'email-header-section');
   const dateLabel = State.mail.label === 'SENT' ? 'Date sent' : 'Date received';
@@ -688,7 +693,8 @@ async function renderEmail(msg) {
           base64 = padB64(data.data);
         }
         if (base64) {
-          htmlData = htmlData.replace(new RegExp(`cid:${inline.id}`, 'g'), `data:${inline.mime};base64,${base64}`);
+          // Robust replacement without breaking on special regex characters
+          htmlData = htmlData.split(`cid:${inline.id}`).join(`data:${inline.mime};base64,${base64}`);
         }
       } catch (e) { }
     }
@@ -735,10 +741,14 @@ async function renderEmail(msg) {
     
     atts.forEach(a => {
       const chip = el('div', 'attachment-chip');
+      const thumbArea = el('div', 'attachment-thumb-area');
+      const infoArea = el('div', 'attachment-info');
+      
+      infoArea.append(el('span', 'chip-name', a.filename), el('span', 'chip-size', formatBytes(a.size)));
+      
       if (a.mime && a.mime.startsWith('image/')) {
-        chip.classList.add('is-image');
         const img = el('img', 'attachment-thumb');
-        chip.append(img, el('span', 'chip-name', a.filename));
+        thumbArea.appendChild(img);
         if (a.data) {
           img.src = `data:${a.mime};base64,${padB64(a.data)}`;
         } else if (a.attachmentId) {
@@ -747,11 +757,14 @@ async function renderEmail(msg) {
             .catch(() => { img.src = ''; }); 
         }
       } else {
-        chip.append(el('span','','📄'), el('span','chip-name', a.filename), el('span', 'chip-size', formatBytes(a.size)));
+        thumbArea.textContent = getFileIcon(a.mime, a.filename);
       }
+      
+      chip.append(thumbArea, infoArea);
       chip.onclick = () => downloadAttachment(msg.id, a.attachmentId, a.filename, a.data, a.mime);
       chips.appendChild(chip);
     });
+    
     attContainer.appendChild(chips);
     scrollWrapper.appendChild(attContainer);
   }
@@ -798,8 +811,9 @@ async function renderEmail(msg) {
     </div><br>`;
 
     const bodyStr = fwdHeader + cleanHtml;
-    State.compose.attachments = forwardFiles;
     openComposeModal('', 'Fwd: ' + decodeEntities(headers['Subject'] || ''), bodyStr, 'Forward Message', true);
+    
+    State.compose.attachments = forwardFiles;
     renderAttachmentChips('compose');
   });
   
@@ -890,7 +904,10 @@ async function downloadAttachment(msgId, attId, filename, inlineData, mimeType) 
     a.href = URL.createObjectURL(blob);
     a.download = filename;
     a.click();
-  } catch(e) { toast('Error downloading attachment', 'error'); }
+  } catch(e) { 
+    toast('Error downloading attachment', 'error'); 
+    console.error("Attachment Download Error:", e);
+  }
 }
 
 function toggleReply(forceClose = false) {
@@ -971,12 +988,34 @@ function handleAttachFiles(e, type) {
 function renderAttachmentChips(type) {
   const list = document.getElementById(type === 'reply' ? 'reply-attached-files-list' : 'attached-files-list');
   list.innerHTML = '';
+  list.className = 'attached-files attachment-chips'; // Standardize the wrapper layout
+  
   State[type].attachments.forEach(file => {
-    const tag = el('div', 'attached-file-tag', `📄 ${file.name} `);
-    const btn = el('button', '', '✕');
-    btn.onclick = () => { State[type].attachments = State[type].attachments.filter(f => f !== file); tag.remove(); };
-    tag.appendChild(btn);
-    list.appendChild(tag);
+    const chip = el('div', 'attachment-chip');
+    const thumbArea = el('div', 'attachment-thumb-area');
+    const infoArea = el('div', 'attachment-info');
+    
+    infoArea.append(el('span', 'chip-name', file.name), el('span', 'chip-size', formatBytes(file.size)));
+    
+    if (file.type && file.type.startsWith('image/')) {
+      const img = el('img', 'attachment-thumb');
+      const reader = new FileReader();
+      reader.onload = (e) => img.src = e.target.result;
+      reader.readAsDataURL(file);
+      thumbArea.appendChild(img);
+    } else {
+      thumbArea.textContent = getFileIcon(file.type, file.name);
+    }
+    
+    const btn = el('button', 'chip-delete-btn', '✕');
+    btn.onclick = (e) => { 
+      e.stopPropagation(); 
+      State[type].attachments = State[type].attachments.filter(f => f !== file); 
+      chip.remove(); 
+    };
+    
+    chip.append(thumbArea, infoArea, btn);
+    list.appendChild(chip);
   });
 }
 
@@ -1038,12 +1077,13 @@ async function sendRawEmail(to, cc, subject, htmlBody, attachments, threadId) {
   if (hasAttachments) {
     for (const file of attachments) {
       const data = await new Promise((res) => { const r = new FileReader(); r.onload = e => res(e.target.result.split(',')[1]); r.readAsDataURL(file); });
-      const encodedName = encodeFilename(file.name);
+      const mimeParams = getMimeFilenameParams(file.name);
+      
       emailStr += `--${boundaryMixed}\r\n`;
-      emailStr += `Content-Type: ${file.type || 'application/octet-stream'}; name=${encodedName}\r\n`;
-      emailStr += `Content-Disposition: attachment; filename=${encodedName}\r\n`;
+      emailStr += `Content-Type: ${file.type || 'application/octet-stream'}; ${mimeParams.nameStr}\r\n`;
+      emailStr += `Content-Disposition: attachment; ${mimeParams.filenameStr}\r\n`;
       emailStr += `Content-Transfer-Encoding: base64\r\n\r\n`;
-      emailStr += `${chunkString(data)}\r\n`;
+      emailStr += `${chunkString(data)}\r\n`; 
     }
     emailStr += `--${boundaryMixed}--\r\n`;
   }
@@ -1212,7 +1252,7 @@ async function loadContacts(loadMore = false) {
     if(!loadMore) State.contacts.items =[];
     
     const items = data.connections ||[];
-    State.contacts.items =[...State.contacts.items, ...items];
+    State.contacts.items = [...State.contacts.items, ...items];
     
     renderContactsList(State.contacts.items, !loadMore);
     document.getElementById('btn-load-more-contacts').style.display = State.contacts.pageToken ? 'block' : 'none';
@@ -1329,7 +1369,7 @@ async function saveContact() {
     etag: document.getElementById('contact-etag').value, 
     names:[{ givenName: first || 'Unknown', familyName: last }] 
   };
-  const updateFields =['names'];
+  const updateFields = ['names'];
   
   const email = document.getElementById('contact-edit-email').value.trim();
   const phone = document.getElementById('contact-edit-phone').value.trim();
