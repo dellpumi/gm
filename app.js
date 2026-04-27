@@ -7,7 +7,7 @@ function el(tag, className = '', textContent = '', attributes = {}) {
   const e = document.createElement(tag);
   if (className) e.className = className;
   if (textContent) e.textContent = textContent;
-  for (const[key, val] of Object.entries(attributes)) {
+  for (const [key, val] of Object.entries(attributes)) {
     if (key === 'style') e.style.cssText = val;
     else if (key.startsWith('data-')) e.setAttribute(key, val);
     else e[key] = val;
@@ -58,12 +58,19 @@ const formatTimestamp = (dateStr) => {
   return `${d.getFullYear().toString().slice(-2)}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// Safely pad Google's URL-safe Base64 to prevent atob() DOM exceptions for binary files
+const padB64 = str => {
+  let b64 = (str || '').replace(/-/g, '+').replace(/_/g, '/');
+  while (b64.length % 4) b64 += '=';
+  return b64;
+};
+
 function decodeRFC2047(str) {
   if (!str) return '';
   return str.replace(/=\?([a-zA-Z0-9\-]+)\?([bBqQ])\?([^\?]+)\?=/g, (match, charset, encoding, data) => {
     try {
       if (encoding.toUpperCase() === 'B') {
-        const bin = atob(data);
+        const bin = atob(padB64(data));
         const bytes = new Uint8Array(bin.length);
         for (let i=0; i<bin.length; i++) bytes[i] = bin.charCodeAt(i);
         return new TextDecoder(charset.toLowerCase()).decode(bytes);
@@ -123,7 +130,6 @@ function chunkString(str, len = 76) {
 function encodeFilename(str) {
   if (!str) return '""';
   if (!/[^\x00-\x7F]/.test(str)) return `"${str}"`;
-  // Do NOT wrap encoded subjects in quotes, RFC 2047 strict compliance
   return encodeSubject(str); 
 }
 
@@ -145,7 +151,7 @@ function encodeAddressList(str) {
 
 const decodeB64 = str => {
   try {
-    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/'));
+    const bin = atob(padB64(str));
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return new TextDecoder('utf-8').decode(bytes);
@@ -567,12 +573,19 @@ function getEmailHtml(payload) {
   return res;
 }
 
-// Deep inspection to pull out attachments, even if filename isn't strictly defined
+// Deep, strict inspection to pull out ALL binary format attachments reliably
 function getAttachmentsAndInlines(payload) {
   const atts = [];
   const inlines =[];
+
   function walk(part) {
     if (!part) return;
+
+    // Multipart containers aren't files themselves, keep walking inside them.
+    if (part.mimeType && part.mimeType.startsWith('multipart/')) {
+      (part.parts ||[]).forEach(walk);
+      return;
+    }
 
     let filename = part.filename || '';
     const headers = part.headers ||[];
@@ -589,14 +602,26 @@ function getAttachmentsAndInlines(payload) {
       const match = typeHeader.value.match(/name="?([^";]+)"?/i);
       if (match) filename = match[1];
     }
+    
+    // Check for UTF-8 encoded names in headers
+    if (!filename && dispHeader) {
+      const match = dispHeader.value.match(/filename\*=[^']+'[^']*'([^;]+)/i);
+      if (match) filename = decodeURIComponent(match[1]);
+    }
 
-    const isAttachment = !!part.body?.attachmentId || (dispHeader && dispHeader.value.toLowerCase().includes('attachment'));
+    const hasAttachmentId = !!part.body?.attachmentId;
+    const isExplicitAttachment = dispHeader && dispHeader.value.toLowerCase().includes('attachment');
     const isInline = cidHeader || (dispHeader && dispHeader.value.toLowerCase().includes('inline'));
 
-    if ((isAttachment || isInline || filename) && part.mimeType !== 'text/html' && part.mimeType !== 'text/plain') {
-      filename = filename ? decodeRFC2047(filename) : 'Unnamed_Attachment';
-      
-      if (isInline && cidHeader) {
+    // An email message body is strictly text/plain or text/html AND has no file-like traits
+    const isTextOrHtml = part.mimeType === 'text/plain' || part.mimeType === 'text/html';
+    const isBodyContainer = isTextOrHtml && !filename && !hasAttachmentId && !isExplicitAttachment;
+
+    // If it's a PDF, Docx, Zip, Mp4, Excel, it bypasses the `isBodyContainer` rule completely.
+    if (!isBodyContainer) {
+      filename = filename ? decodeRFC2047(filename).replace(/(^"|"$)/g, '') : 'Unnamed_File';
+
+      if (cidHeader) {
         inlines.push({
           id: cidHeader.value.replace(/[<>]/g, ''),
           attachmentId: part.body?.attachmentId,
@@ -604,7 +629,7 @@ function getAttachmentsAndInlines(payload) {
           mime: part.mimeType,
           filename: filename
         });
-      } else {
+      } else if (filename || hasAttachmentId || isExplicitAttachment) {
         atts.push({
           filename: filename,
           attachmentId: part.body?.attachmentId,
@@ -614,8 +639,10 @@ function getAttachmentsAndInlines(payload) {
         });
       }
     }
+    
     (part.parts ||[]).forEach(walk);
   }
+  
   walk(payload);
   return { atts, inlines };
 }
@@ -648,10 +675,10 @@ async function renderEmail(msg) {
       try {
         let base64 = '';
         if (inline.data) {
-          base64 = inline.data.replace(/-/g,'+').replace(/_/g,'/');
+          base64 = padB64(inline.data);
         } else if (inline.attachmentId) {
           const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/attachments/${inline.attachmentId}`);
-          base64 = data.data.replace(/-/g,'+').replace(/_/g,'/');
+          base64 = padB64(data.data);
         }
         if (base64) {
           htmlData = htmlData.replace(new RegExp(`cid:${inline.id}`, 'g'), `data:${inline.mime};base64,${base64}`);
@@ -706,10 +733,11 @@ async function renderEmail(msg) {
         const img = el('img', 'attachment-thumb');
         chip.append(img, el('span', 'chip-name', a.filename));
         if (a.data) {
-          img.src = `data:${a.mime};base64,${a.data.replace(/-/g,'+').replace(/_/g,'/')}`;
+          img.src = `data:${a.mime};base64,${padB64(a.data)}`;
         } else if (a.attachmentId) {
           gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/attachments/${a.attachmentId}`)
-            .then(data => { img.src = `data:${a.mime};base64,${data.data.replace(/-/g,'+').replace(/_/g,'/')}`; });
+            .then(data => { img.src = `data:${a.mime};base64,${padB64(data.data)}`; })
+            .catch(() => { img.src = ''; }); 
         }
       } else {
         chip.append(el('span','','📄'), el('span','chip-name', a.filename), el('span', 'chip-size', formatBytes(a.size)));
@@ -736,14 +764,15 @@ async function renderEmail(msg) {
       toast('Fetching attachments...', 'info');
       try {
         for (const a of atts) {
-          let bytes;
+          let b64str;
           if (a.data) {
-            bytes = atob(a.data.replace(/-/g,'+').replace(/_/g,'/'));
+            b64str = padB64(a.data);
           } else if (a.attachmentId) {
             const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/attachments/${a.attachmentId}`);
-            bytes = atob(data.data.replace(/-/g,'+').replace(/_/g,'/'));
+            b64str = padB64(data.data);
           }
-          if (bytes) {
+          if (b64str) {
+            const bytes = atob(b64str);
             const arr = new Uint8Array(bytes.length);
             for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
             const file = new File([arr], a.filename, { type: a.mime || 'application/octet-stream' });
@@ -840,13 +869,14 @@ function hideEmailDetail() {
 async function downloadAttachment(msgId, attId, filename, inlineData, mimeType) {
   toast('Downloading…', 'info');
   try {
-    let bytes;
+    let b64str = '';
     if (inlineData) {
-      bytes = atob(inlineData.replace(/-/g,'+').replace(/_/g,'/'));
+      b64str = padB64(inlineData);
     } else {
       const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msgId}/attachments/${attId}`);
-      bytes = atob(data.data.replace(/-/g,'+').replace(/_/g,'/'));
+      b64str = padB64(data.data);
     }
+    const bytes = atob(b64str);
     const arr = new Uint8Array(bytes.length);
     for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
     const blob = new Blob([arr], { type: mimeType || 'application/octet-stream' });
@@ -969,7 +999,7 @@ async function sendRawEmail(to, cc, subject, htmlBody, attachments, threadId) {
   emailStr += `Subject: ${encodeSubject(subject)}\r\n`;
   emailStr += `MIME-Version: 1.0\r\n`;
 
-  let inlines = [];
+  let inlines =[];
   let processedHtml = htmlBody.replace(/<img[^>]+src="data:(image\/[^;]+);base64,([^"]+)"[^>]*>/g, (match, mime, b64) => {
     let cid = 'img_' + Math.random().toString(36).substr(2);
     inlines.push({ cid, mime, b64 });
@@ -978,21 +1008,36 @@ async function sendRawEmail(to, cc, subject, htmlBody, attachments, threadId) {
 
   const hasAttachments = attachments && attachments.length > 0;
   
-  if (hasAttachments) { emailStr += `Content-Type: multipart/mixed; boundary="${boundaryMixed}"\r\n\r\n--${boundaryMixed}\r\n`; }
+  if (hasAttachments) { 
+      emailStr += `Content-Type: multipart/mixed; boundary="${boundaryMixed}"\r\n\r\n`;
+      emailStr += `--${boundaryMixed}\r\n`; 
+  }
   
   emailStr += `Content-Type: multipart/related; boundary="${boundaryRel}"\r\n\r\n`;
-  emailStr += `--${boundaryRel}\r\nContent-Type: text/html; charset="UTF-8"\r\nContent-Transfer-Encoding: base64\r\n\r\n${chunkString(utf8ToBase64(processedHtml))}`;
+  emailStr += `--${boundaryRel}\r\n`;
+  emailStr += `Content-Type: text/html; charset="UTF-8"\r\n`;
+  emailStr += `Content-Transfer-Encoding: base64\r\n\r\n`;
+  emailStr += `${chunkString(utf8ToBase64(processedHtml))}\r\n`;
   
   for (const inline of inlines) {
-    emailStr += `\r\n--${boundaryRel}\r\nContent-Type: ${inline.mime}\r\nContent-Transfer-Encoding: base64\r\nContent-ID: <${inline.cid}>\r\nContent-Disposition: inline\r\n\r\n${chunkString(inline.b64)}`;
+    emailStr += `--${boundaryRel}\r\n`;
+    emailStr += `Content-Type: ${inline.mime}\r\n`;
+    emailStr += `Content-Transfer-Encoding: base64\r\n`;
+    emailStr += `Content-ID: <${inline.cid}>\r\n`;
+    emailStr += `Content-Disposition: inline\r\n\r\n`;
+    emailStr += `${chunkString(inline.b64)}\r\n`;
   }
-  emailStr += `\r\n--${boundaryRel}--\r\n`;
+  emailStr += `--${boundaryRel}--\r\n`;
 
   if (hasAttachments) {
     for (const file of attachments) {
       const data = await new Promise((res) => { const r = new FileReader(); r.onload = e => res(e.target.result.split(',')[1]); r.readAsDataURL(file); });
       const encodedName = encodeFilename(file.name);
-      emailStr += `--${boundaryMixed}\r\nContent-Type: ${file.type || 'application/octet-stream'}; name=${encodedName}\r\nContent-Disposition: attachment; filename=${encodedName}\r\nContent-Transfer-Encoding: base64\r\n\r\n${chunkString(data)}\r\n`;
+      emailStr += `--${boundaryMixed}\r\n`;
+      emailStr += `Content-Type: ${file.type || 'application/octet-stream'}; name=${encodedName}\r\n`;
+      emailStr += `Content-Disposition: attachment; filename=${encodedName}\r\n`;
+      emailStr += `Content-Transfer-Encoding: base64\r\n\r\n`;
+      emailStr += `${chunkString(data)}\r\n`;
     }
     emailStr += `--${boundaryMixed}--\r\n`;
   }
@@ -1158,7 +1203,7 @@ async function loadContacts(loadMore = false) {
     const data = await gapi('GET', `https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations&pageSize=100${pageParam}`);
     
     State.contacts.pageToken = data.nextPageToken || null;
-    if(!loadMore) State.contacts.items = [];
+    if(!loadMore) State.contacts.items =[];
     
     const items = data.connections ||[];
     State.contacts.items =[...State.contacts.items, ...items];
