@@ -123,7 +123,7 @@ function chunkString(str, len = 76) {
 function encodeFilename(str) {
   if (!str) return '""';
   if (!/[^\x00-\x7F]/.test(str)) return `"${str}"`;
-  return encodeSubject(str);
+  return `"${encodeSubject(str)}"`; // Always wrap in quotes for strict SMTP parsers
 }
 
 function encodeAddressList(str) {
@@ -239,7 +239,10 @@ function setupEventListeners() {
   document.getElementById('btn-load-more-contacts').addEventListener('click', () => loadContacts(true));
 
   document.getElementById('btn-compose').addEventListener('click', () => openComposeModal());
-  document.getElementById('btn-close-compose').addEventListener('click', () => document.getElementById('compose-modal').classList.remove('open'));
+  document.getElementById('btn-close-compose').addEventListener('click', () => {
+    document.getElementById('compose-modal').classList.remove('open');
+    State.compose.attachments =[];
+  });
   document.getElementById('btn-send-email').addEventListener('click', () => confirmAction('Send Message', 'Are you ready to send this message?', 'Send', sendEmail));
   
   document.getElementById('btn-toggle-reply').addEventListener('click', () => toggleReply(false));
@@ -476,7 +479,7 @@ async function loadEmails(label, loadMore = false) {
       gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`)
     ));
 
-    State.mail.items =[...State.mail.items, ...newMsgs];
+    State.mail.items = [...State.mail.items, ...newMsgs];
     renderEmailList(newMsgs, !loadMore);
     if (State.mail.pageToken) btnMore.style.display = 'block';
 
@@ -563,29 +566,51 @@ function getEmailHtml(payload) {
   return res;
 }
 
+// Deep inspection to pull out attachments, even if filename isn't strictly defined
 function getAttachmentsAndInlines(payload) {
   const atts = [];
   const inlines =[];
   function walk(part) {
     if (!part) return;
-    if (part.filename && (part.body?.attachmentId || part.body?.data)) {
-      const headers = part.headers ||[];
-      const isInline = headers.some(h => h.name.toLowerCase() === 'content-id' || (h.name.toLowerCase() === 'content-disposition' && h.value.toLowerCase().includes('inline')));
+
+    let filename = part.filename || '';
+    const headers = part.headers ||[];
+    
+    const dispHeader = headers.find(h => h.name.toLowerCase() === 'content-disposition');
+    const cidHeader = headers.find(h => h.name.toLowerCase() === 'content-id');
+    const typeHeader = headers.find(h => h.name.toLowerCase() === 'content-type');
+
+    if (!filename && dispHeader) {
+      const match = dispHeader.value.match(/filename="?([^";]+)"?/i);
+      if (match) filename = match[1];
+    }
+    if (!filename && typeHeader) {
+      const match = typeHeader.value.match(/name="?([^";]+)"?/i);
+      if (match) filename = match[1];
+    }
+
+    const isAttachment = !!part.body?.attachmentId || (dispHeader && dispHeader.value.toLowerCase().includes('attachment'));
+    const isInline = cidHeader || (dispHeader && dispHeader.value.toLowerCase().includes('inline'));
+
+    if ((isAttachment || isInline || filename) && part.mimeType !== 'text/html' && part.mimeType !== 'text/plain') {
+      filename = filename ? decodeRFC2047(filename) : 'Unnamed_Attachment';
       
-      if (isInline) {
-        const cidHeader = headers.find(h => h.name.toLowerCase() === 'content-id');
-        if (cidHeader) {
-          inlines.push({
-            id: cidHeader.value.replace(/[<>]/g, ''),
-            attachmentId: part.body.attachmentId,
-            data: part.body.data,
-            mime: part.mimeType
-          });
-        } else {
-          atts.push({ filename: decodeRFC2047(part.filename), attachmentId: part.body.attachmentId, data: part.body.data, size: part.body.size || 0, mime: part.mimeType });
-        }
+      if (isInline && cidHeader) {
+        inlines.push({
+          id: cidHeader.value.replace(/[<>]/g, ''),
+          attachmentId: part.body?.attachmentId,
+          data: part.body?.data,
+          mime: part.mimeType,
+          filename: filename
+        });
       } else {
-        atts.push({ filename: decodeRFC2047(part.filename), attachmentId: part.body.attachmentId, data: part.body.data, size: part.body.size || 0, mime: part.mimeType });
+        atts.push({
+          filename: filename,
+          attachmentId: part.body?.attachmentId,
+          data: part.body?.data,
+          size: part.body?.size || 0,
+          mime: part.mimeType
+        });
       }
     }
     (part.parts ||[]).forEach(walk);
@@ -658,7 +683,7 @@ async function renderEmail(msg) {
   }
   scrollWrapper.appendChild(bodyContainer);
 
-  if (atts.length) {
+  if (atts.length > 0) {
     const attContainer = el('div', 'attachments');
     attContainer.appendChild(el('div', 'attachments-title', `📎 Attachments (${atts.length})`));
     const chips = el('div', 'attachment-chips');
@@ -678,7 +703,7 @@ async function renderEmail(msg) {
       } else {
         chip.append(el('span','','📄'), el('span','chip-name', a.filename), el('span', 'chip-size', formatBytes(a.size)));
       }
-      chip.onclick = () => downloadAttachment(msg.id, a.attachmentId, a.filename, a.data);
+      chip.onclick = () => downloadAttachment(msg.id, a.attachmentId, a.filename, a.data, a.mime);
       chips.appendChild(chip);
     });
     attContainer.appendChild(chips);
@@ -691,10 +716,7 @@ async function renderEmail(msg) {
   actionBar.innerHTML = '';
   
   const btnReply = el('button', 'action-btn primary', '↩ Reply');
-  btnReply.onclick = () => {
-    const replyEd = document.getElementById('reply-editor');
-    if (!replyEd.classList.contains('open')) toggleReply(false);
-  };
+  btnReply.onclick = () => toggleReply(false);
   
   const btnFwd = el('button', 'action-btn', '↗ Forward');
   btnFwd.onclick = () => confirmAction('Forward Message', 'Would you like to forward this message?', 'Forward', async () => {
@@ -759,6 +781,23 @@ async function renderEmail(msg) {
     } catch(e) { toast('Failed to archive: ' + e.message, 'error'); btnArchive.textContent = origText; btnArchive.disabled = false; }
   };
   
+  const btnUnread = el('button', 'action-btn', '✉ Mark Unread');
+  btnUnread.onclick = async () => {
+    const origText = btnUnread.textContent;
+    btnUnread.disabled = true; btnUnread.textContent = 'Wait...';
+    try {
+      await gapi('POST', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/modify`, { addLabelIds:['UNREAD'] });
+      toast('Marked as unread', 'success');
+      document.getElementById('email-detail-panel').classList.remove('open');
+      hideEmailDetail();
+      refreshCurrent();
+    } catch(e) { 
+      toast('Failed to mark unread: ' + e.message, 'error'); 
+      btnUnread.textContent = origText; 
+      btnUnread.disabled = false; 
+    }
+  };
+
   const btnTrash = el('button', 'action-btn', '🗑 Delete', { style: 'color:var(--red)' });
   btnTrash.onclick = () => confirmAction('Delete Message', 'Are you sure you want to move this message to trash?', 'Delete', async () => {
     const origText = btnTrash.textContent;
@@ -769,7 +808,7 @@ async function renderEmail(msg) {
     } catch(e) { toast('Failed to delete: ' + e.message, 'error'); btnTrash.textContent = origText; btnTrash.disabled = false; }
   }, true);
   
-  actionBar.append(btnReply, btnFwd, btnStar, btnArchive, btnTrash);
+  actionBar.append(btnReply, btnFwd, btnStar, btnArchive, btnUnread, btnTrash);
   actionBar.style.display = 'flex';
   document.getElementById('reply-section').style.display = 'block';
 }
@@ -787,7 +826,7 @@ function hideEmailDetail() {
   document.getElementById('reply-section').style.display = 'none';
 }
 
-async function downloadAttachment(msgId, attId, filename, inlineData) {
+async function downloadAttachment(msgId, attId, filename, inlineData, mimeType) {
   toast('Downloading…', 'info');
   try {
     let bytes;
@@ -799,7 +838,7 @@ async function downloadAttachment(msgId, attId, filename, inlineData) {
     }
     const arr = new Uint8Array(bytes.length);
     for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-    const blob = new Blob([arr], { type: 'application/octet-stream' });
+    const blob = new Blob([arr], { type: mimeType || 'application/octet-stream' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = filename;
@@ -919,7 +958,7 @@ async function sendRawEmail(to, cc, subject, htmlBody, attachments, threadId) {
   emailStr += `Subject: ${encodeSubject(subject)}\r\n`;
   emailStr += `MIME-Version: 1.0\r\n`;
 
-  let inlines =[];
+  let inlines = [];
   let processedHtml = htmlBody.replace(/<img[^>]+src="data:(image\/[^;]+);base64,([^"]+)"[^>]*>/g, (match, mime, b64) => {
     let cid = 'img_' + Math.random().toString(36).substr(2);
     inlines.push({ cid, mime, b64 });
@@ -1108,7 +1147,7 @@ async function loadContacts(loadMore = false) {
     const data = await gapi('GET', `https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations&pageSize=100${pageParam}`);
     
     State.contacts.pageToken = data.nextPageToken || null;
-    if(!loadMore) State.contacts.items =[];
+    if(!loadMore) State.contacts.items = [];
     
     const items = data.connections ||[];
     State.contacts.items =[...State.contacts.items, ...items];
@@ -1228,7 +1267,7 @@ async function saveContact() {
     etag: document.getElementById('contact-etag').value, 
     names:[{ givenName: first || 'Unknown', familyName: last }] 
   };
-  const updateFields = ['names'];
+  const updateFields =['names'];
   
   const email = document.getElementById('contact-edit-email').value.trim();
   const phone = document.getElementById('contact-edit-phone').value.trim();
