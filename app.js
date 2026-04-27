@@ -1,4 +1,3 @@
-// app.js - UI Logic, DOM Manipulation, and Event Binding
 import { State, Auth, gapi } from './api.js';
 
 const escHtml = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -594,32 +593,39 @@ function getAttachmentsAndInlines(payload) {
     const cidHeader = headers.find(h => h.name.toLowerCase() === 'content-id');
     const typeHeader = headers.find(h => h.name.toLowerCase() === 'content-type');
 
+    // --- Filename extraction (order matters: most specific first) ---
+    // 1. RFC 5987 extended parameter (filename*=UTF-8''...) in Content-Disposition
     if (!filename && dispHeader) {
-      const match = dispHeader.value.match(/filename="?([^";]+)"?/i);
-      if (match) filename = match[1];
-    }
-    if (!filename && typeHeader) {
-      const match = typeHeader.value.match(/name="?([^";]+)"?/i);
-      if (match) filename = match[1];
-    }
-    
-    // Check for UTF-8 encoded names in headers
-    if (!filename && dispHeader) {
-      const match = dispHeader.value.match(/filename\*=[^']+'[^']*'([^;]+)/i);
+      const match = dispHeader.value.match(/filename\*\s*=\s*[^']+'[^']*'([^;\s]+)/i);
       if (match) filename = decodeURIComponent(match[1]);
+    }
+    // 2. Quoted or unquoted filename= in Content-Disposition
+    if (!filename && dispHeader) {
+      const match = dispHeader.value.match(/filename\s*=\s*"?([^";]+)"?/i);
+      if (match) filename = match[1].trim();
+    }
+    // 3. RFC 5987 extended parameter (name*=UTF-8''...) in Content-Type
+    if (!filename && typeHeader) {
+      const match = typeHeader.value.match(/name\*\s*=\s*[^']+'[^']*'([^;\s]+)/i);
+      if (match) filename = decodeURIComponent(match[1]);
+    }
+    // 4. Quoted or unquoted name= in Content-Type
+    if (!filename && typeHeader) {
+      const match = typeHeader.value.match(/name\s*=\s*"?([^";]+)"?/i);
+      if (match) filename = match[1].trim();
     }
 
     const hasAttachmentId = !!part.body?.attachmentId;
-    const isExplicitAttachment = dispHeader && dispHeader.value.toLowerCase().includes('attachment');
-    const isInline = cidHeader || (dispHeader && dispHeader.value.toLowerCase().includes('inline'));
+    const hasInlineData   = !!part.body?.data;
+    const isExplicitAttachment = dispHeader && dispHeader.value.toLowerCase().startsWith('attachment');
+    const isInline = cidHeader || (dispHeader && dispHeader.value.toLowerCase().startsWith('inline'));
 
     // An email message body is strictly text/plain or text/html AND has no file-like traits
     const isTextOrHtml = part.mimeType === 'text/plain' || part.mimeType === 'text/html';
-    const isBodyContainer = isTextOrHtml && !filename && !hasAttachmentId && !isExplicitAttachment;
+    const isBodyContainer = isTextOrHtml && !filename && !hasAttachmentId && !hasInlineData && !isExplicitAttachment;
 
-    // If it's a PDF, Docx, Zip, Mp4, Excel, it bypasses the `isBodyContainer` rule completely.
     if (!isBodyContainer) {
-      filename = filename ? decodeRFC2047(filename).replace(/(^"|"$)/g, '') : 'Unnamed_File';
+      filename = filename ? decodeRFC2047(filename).replace(/(^"|"$)/g, '').trim() : 'Unnamed_File';
 
       if (cidHeader) {
         inlines.push({
@@ -629,7 +635,7 @@ function getAttachmentsAndInlines(payload) {
           mime: part.mimeType,
           filename: filename
         });
-      } else if (filename || hasAttachmentId || isExplicitAttachment) {
+      } else if (filename || hasAttachmentId || hasInlineData || isExplicitAttachment) {
         atts.push({
           filename: filename,
           attachmentId: part.body?.attachmentId,
@@ -791,9 +797,8 @@ async function renderEmail(msg) {
     </div><br>`;
 
     const bodyStr = fwdHeader + cleanHtml;
-    openComposeModal('', 'Fwd: ' + decodeEntities(headers['Subject'] || ''), bodyStr, 'Forward Message');
-    
     State.compose.attachments = forwardFiles;
+    openComposeModal('', 'Fwd: ' + decodeEntities(headers['Subject'] || ''), bodyStr, 'Forward Message', true);
     renderAttachmentChips('compose');
   });
   
@@ -942,14 +947,14 @@ async function sendReply() {
   } catch (e) { toast('Failed to send reply: ' + e.message, 'error'); }
 }
 
-function openComposeModal(to='', subj='', bodyHtml='', title='New Message') {
+function openComposeModal(to='', subj='', bodyHtml='', title='New Message', keepAttachments=false) {
   document.getElementById('compose-modal').classList.add('open');
   document.getElementById('compose-title').textContent = title;
   document.getElementById('compose-to').value = to;
   document.getElementById('compose-cc').value = '';
   document.getElementById('compose-subject').value = subj;
   document.getElementById('compose-body-text').innerHTML = bodyHtml;
-  State.compose.attachments =[];
+  if (!keepAttachments) State.compose.attachments =[];
   renderAttachmentChips('compose');
 }
 
