@@ -98,12 +98,32 @@ function utf8ToBase64url(str) {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
+function utf8ToBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  const chunkSize = 0x8000; 
+  for (let i = 0; i < bytes.length; i += chunkSize) { bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize)); }
+  return btoa(bin);
+}
+
 function encodeSubject(str) {
   if (!str) return '';
   const bytes = new TextEncoder().encode(str);
   let bin = '';
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return `=?UTF-8?B?${btoa(bin)}?=`;
+}
+
+function chunkString(str, len = 76) {
+  let res = '';
+  for (let i = 0; i < str.length; i += len) { res += str.slice(i, i + len) + '\r\n'; }
+  return res;
+}
+
+function encodeFilename(str) {
+  if (!str) return '""';
+  if (!/[^\x00-\x7F]/.test(str)) return `"${str}"`;
+  return encodeSubject(str);
 }
 
 function encodeAddressList(str) {
@@ -188,7 +208,6 @@ function setupEventListeners() {
 
   document.getElementById('btn-confirm-no').addEventListener('click', () => document.getElementById('confirm-modal').classList.remove('open'));
 
-  // Universal Escape Key Handler
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       const confirm = document.getElementById('confirm-modal');
@@ -223,13 +242,8 @@ function setupEventListeners() {
   document.getElementById('btn-close-compose').addEventListener('click', () => document.getElementById('compose-modal').classList.remove('open'));
   document.getElementById('btn-send-email').addEventListener('click', () => confirmAction('Send Message', 'Are you ready to send this message?', 'Send', sendEmail));
   
-  document.getElementById('btn-toggle-reply').addEventListener('click', toggleReply);
-  document.getElementById('btn-cancel-reply').addEventListener('click', () => {
-    document.getElementById('reply-editor').classList.remove('open');
-    document.getElementById('reply-arrow').textContent = '▶';
-    document.getElementById('reply-body').innerHTML = ''; 
-    State.reply.attachments =[];
-  });
+  document.getElementById('btn-toggle-reply').addEventListener('click', () => toggleReply(false));
+  document.getElementById('btn-cancel-reply').addEventListener('click', () => toggleReply(true));
   document.getElementById('btn-send-reply').addEventListener('click', () => confirmAction('Send Reply', 'Are you sure you want to send this reply?', 'Send', sendReply));
 
   document.getElementById('compose-attach-input').addEventListener('change', (e) => handleAttachFiles(e, 'compose'));
@@ -521,11 +535,7 @@ async function openEmail(msgMeta, elNode) {
   document.getElementById('email-action-bar').style.display = 'none';
   document.getElementById('reply-section').style.display = 'none';
   
-  if (document.getElementById('reply-editor').classList.contains('open')) {
-    document.getElementById('reply-editor').classList.remove('open');
-    document.getElementById('reply-arrow').textContent = '▶';
-  }
-  
+  toggleReply(true); // Force clear/close reply editor if opening a new email
   loadingState(document.getElementById('email-viewer'));
 
   try {
@@ -554,19 +564,28 @@ function getEmailHtml(payload) {
 }
 
 function getAttachmentsAndInlines(payload) {
-  const atts =[];
+  const atts = [];
   const inlines =[];
   function walk(part) {
     if (!part) return;
-    if (part.filename && part.body?.attachmentId) {
-      if (part.headers.some(h => h.name.toLowerCase() === 'content-id')) {
-        inlines.push({
-          id: part.headers.find(h => h.name.toLowerCase() === 'content-id').value.replace(/[<>]/g, ''),
-          attachmentId: part.body.attachmentId,
-          mime: part.mimeType
-        });
+    if (part.filename && (part.body?.attachmentId || part.body?.data)) {
+      const headers = part.headers ||[];
+      const isInline = headers.some(h => h.name.toLowerCase() === 'content-id' || (h.name.toLowerCase() === 'content-disposition' && h.value.toLowerCase().includes('inline')));
+      
+      if (isInline) {
+        const cidHeader = headers.find(h => h.name.toLowerCase() === 'content-id');
+        if (cidHeader) {
+          inlines.push({
+            id: cidHeader.value.replace(/[<>]/g, ''),
+            attachmentId: part.body.attachmentId,
+            data: part.body.data,
+            mime: part.mimeType
+          });
+        } else {
+          atts.push({ filename: decodeRFC2047(part.filename), attachmentId: part.body.attachmentId, data: part.body.data, size: part.body.size || 0, mime: part.mimeType });
+        }
       } else {
-        atts.push({ filename: decodeRFC2047(part.filename), attachmentId: part.body.attachmentId, size: part.body.size || 0, mime: part.mimeType });
+        atts.push({ filename: decodeRFC2047(part.filename), attachmentId: part.body.attachmentId, data: part.body.data, size: part.body.size || 0, mime: part.mimeType });
       }
     }
     (part.parts ||[]).forEach(walk);
@@ -601,9 +620,16 @@ async function renderEmail(msg) {
   for (const inline of inlines) {
     if (htmlData.includes(`cid:${inline.id}`)) {
       try {
-        const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/attachments/${inline.attachmentId}`);
-        const base64 = data.data.replace(/-/g,'+').replace(/_/g,'/');
-        htmlData = htmlData.replace(new RegExp(`cid:${inline.id}`, 'g'), `data:${inline.mime};base64,${base64}`);
+        let base64 = '';
+        if (inline.data) {
+          base64 = inline.data.replace(/-/g,'+').replace(/_/g,'/');
+        } else if (inline.attachmentId) {
+          const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/attachments/${inline.attachmentId}`);
+          base64 = data.data.replace(/-/g,'+').replace(/_/g,'/');
+        }
+        if (base64) {
+          htmlData = htmlData.replace(new RegExp(`cid:${inline.id}`, 'g'), `data:${inline.mime};base64,${base64}`);
+        }
       } catch (e) { }
     }
   }
@@ -617,7 +643,6 @@ async function renderEmail(msg) {
     if (bodyMatch) cleanHtml = bodyMatch[1];
   }
 
-  // Save parsed history for the Reply generator
   State.reply.originalHtml = cleanHtml;
   State.reply.originalFrom = decodeEntities(headers['From'] || 'Unknown');
   State.reply.originalDate = headers['Date'] || '';
@@ -644,12 +669,16 @@ async function renderEmail(msg) {
         chip.classList.add('is-image');
         const img = el('img', 'attachment-thumb');
         chip.append(img, el('span', 'chip-name', a.filename));
-        gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/attachments/${a.attachmentId}`)
-          .then(data => { img.src = `data:${a.mime};base64,${data.data.replace(/-/g,'+').replace(/_/g,'/')}`; });
+        if (a.data) {
+          img.src = `data:${a.mime};base64,${a.data.replace(/-/g,'+').replace(/_/g,'/')}`;
+        } else if (a.attachmentId) {
+          gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/attachments/${a.attachmentId}`)
+            .then(data => { img.src = `data:${a.mime};base64,${data.data.replace(/-/g,'+').replace(/_/g,'/')}`; });
+        }
       } else {
         chip.append(el('span','','📄'), el('span','chip-name', a.filename), el('span', 'chip-size', formatBytes(a.size)));
       }
-      chip.onclick = () => downloadAttachment(msg.id, a.attachmentId, a.filename);
+      chip.onclick = () => downloadAttachment(msg.id, a.attachmentId, a.filename, a.data);
       chips.appendChild(chip);
     });
     attContainer.appendChild(chips);
@@ -664,7 +693,7 @@ async function renderEmail(msg) {
   const btnReply = el('button', 'action-btn primary', '↩ Reply');
   btnReply.onclick = () => {
     const replyEd = document.getElementById('reply-editor');
-    if (!replyEd.classList.contains('open')) toggleReply();
+    if (!replyEd.classList.contains('open')) toggleReply(false);
   };
   
   const btnFwd = el('button', 'action-btn', '↗ Forward');
@@ -674,12 +703,19 @@ async function renderEmail(msg) {
       toast('Fetching attachments...', 'info');
       try {
         for (const a of atts) {
-          const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/attachments/${a.attachmentId}`);
-          const bytes = atob(data.data.replace(/-/g,'+').replace(/_/g,'/'));
-          const arr = new Uint8Array(bytes.length);
-          for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-          const file = new File([arr], a.filename, { type: a.mime || 'application/octet-stream' });
-          forwardFiles.push(file);
+          let bytes;
+          if (a.data) {
+            bytes = atob(a.data.replace(/-/g,'+').replace(/_/g,'/'));
+          } else if (a.attachmentId) {
+            const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/attachments/${a.attachmentId}`);
+            bytes = atob(data.data.replace(/-/g,'+').replace(/_/g,'/'));
+          }
+          if (bytes) {
+            const arr = new Uint8Array(bytes.length);
+            for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+            const file = new File([arr], a.filename, { type: a.mime || 'application/octet-stream' });
+            forwardFiles.push(file);
+          }
         }
       } catch(e) { toast('Error loading some attachments', 'error'); }
     }
@@ -751,27 +787,34 @@ function hideEmailDetail() {
   document.getElementById('reply-section').style.display = 'none';
 }
 
-async function downloadAttachment(msgId, attId, filename) {
+async function downloadAttachment(msgId, attId, filename, inlineData) {
   toast('Downloading…', 'info');
-  const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msgId}/attachments/${attId}`);
-  const bytes = atob(data.data.replace(/-/g,'+').replace(/_/g,'/'));
-  const arr = new Uint8Array(bytes.length);
-  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-  const blob = new Blob([arr]);
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
+  try {
+    let bytes;
+    if (inlineData) {
+      bytes = atob(inlineData.replace(/-/g,'+').replace(/_/g,'/'));
+    } else {
+      const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msgId}/attachments/${attId}`);
+      bytes = atob(data.data.replace(/-/g,'+').replace(/_/g,'/'));
+    }
+    const arr = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+    const blob = new Blob([arr], { type: 'application/octet-stream' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+  } catch(e) { toast('Error downloading attachment', 'error'); }
 }
 
-let replyOpen = false;
-function toggleReply() {
-  replyOpen = !replyOpen;
+function toggleReply(forceClose = false) {
   const replyEd = document.getElementById('reply-editor');
-  replyEd.classList.toggle('open', replyOpen);
-  document.getElementById('reply-arrow').textContent = replyOpen ? '▼' : '▶';
+  const willOpen = forceClose ? false : !replyEd.classList.contains('open');
   
-  if (replyOpen) {
+  replyEd.classList.toggle('open', willOpen);
+  document.getElementById('reply-arrow').textContent = willOpen ? '▼' : '▶';
+  
+  if (willOpen) {
     const viewer = document.getElementById('email-viewer');
     const fromEl = viewer.querySelector('.email-meta-row:nth-child(2) .email-meta-val');
     const toEl = viewer.querySelector('.email-meta-row:nth-child(3) .email-meta-val');
@@ -780,17 +823,16 @@ function toggleReply() {
     document.getElementById('reply-to').value = targetRecipient || '';
     const subj = viewer.querySelector('.email-title')?.textContent || '';
     document.getElementById('reply-subject').value = subj.startsWith('Re:') ? subj : 'Re: ' + subj;
+    
     State.reply.attachments =[];
     renderAttachmentChips('reply');
     
-    // Inject the perfectly formatted Reply History block
     const historyHtml = `<br><br><div class="gmail_quote">On ${formatTimestamp(State.reply.originalDate)}, ${escHtml(State.reply.originalFrom)} wrote:<br><blockquote style="margin:0 0 0 .8ex;border-left:1px #ccc solid;padding-left:1ex">${State.reply.originalHtml}</blockquote></div>`;
     const replyBody = document.getElementById('reply-body');
     replyBody.innerHTML = `<div><br></div>${historyHtml}`;
     
     replyBody.focus();
     
-    // Auto-scroll cursor to top of the editable div
     try {
       const range = document.createRange();
       const sel = window.getSelection();
@@ -799,9 +841,10 @@ function toggleReply() {
       sel.removeAllRanges();
       sel.addRange(range);
     } catch(e) {}
-
   } else {
     document.getElementById('reply-body').innerHTML = '';
+    State.reply.attachments =[];
+    renderAttachmentChips('reply');
   }
 }
 
@@ -813,9 +856,7 @@ async function sendReply() {
 
   try {
     await sendRawEmail(to, '', subj, body, State.reply.attachments, State.compose.currentThreadId);
-    document.getElementById('reply-editor').classList.remove('open');
-    document.getElementById('reply-arrow').textContent = '▶';
-    document.getElementById('reply-body').innerHTML = ''; 
+    toggleReply(true); 
     toast('Reply sent!', 'success');
     refreshCurrent();
   } catch (e) { toast('Failed to send reply: ' + e.message, 'error'); }
@@ -863,6 +904,7 @@ async function sendEmail() {
   try {
     await sendRawEmail(to, cc, subj, body, State.compose.attachments, null);
     document.getElementById('compose-modal').classList.remove('open');
+    State.compose.attachments =[];
     toast('Sent successfully', 'success');
     refreshCurrent();
   } catch (e) { toast('Failed to send: ' + e.message, 'error'); }
@@ -889,17 +931,18 @@ async function sendRawEmail(to, cc, subject, htmlBody, attachments, threadId) {
   if (hasAttachments) { emailStr += `Content-Type: multipart/mixed; boundary="${boundaryMixed}"\r\n\r\n--${boundaryMixed}\r\n`; }
   
   emailStr += `Content-Type: multipart/related; boundary="${boundaryRel}"\r\n\r\n`;
-  emailStr += `--${boundaryRel}\r\nContent-Type: text/html; charset="UTF-8"\r\nContent-Transfer-Encoding: 8bit\r\n\r\n${processedHtml}\r\n\r\n`;
+  emailStr += `--${boundaryRel}\r\nContent-Type: text/html; charset="UTF-8"\r\nContent-Transfer-Encoding: base64\r\n\r\n${chunkString(utf8ToBase64(processedHtml))}`;
   
   for (const inline of inlines) {
-    emailStr += `--${boundaryRel}\r\nContent-Type: ${inline.mime}\r\nContent-Transfer-Encoding: base64\r\nContent-ID: <${inline.cid}>\r\nContent-Disposition: inline\r\n\r\n${inline.b64}\r\n\r\n`;
+    emailStr += `\r\n--${boundaryRel}\r\nContent-Type: ${inline.mime}\r\nContent-Transfer-Encoding: base64\r\nContent-ID: <${inline.cid}>\r\nContent-Disposition: inline\r\n\r\n${chunkString(inline.b64)}`;
   }
-  emailStr += `--${boundaryRel}--\r\n`;
+  emailStr += `\r\n--${boundaryRel}--\r\n`;
 
   if (hasAttachments) {
     for (const file of attachments) {
       const data = await new Promise((res) => { const r = new FileReader(); r.onload = e => res(e.target.result.split(',')[1]); r.readAsDataURL(file); });
-      emailStr += `--${boundaryMixed}\r\nContent-Type: ${file.type || 'application/octet-stream'}; name="${encodeSubject(file.name)}"\r\nContent-Disposition: attachment; filename="${encodeSubject(file.name)}"\r\nContent-Transfer-Encoding: base64\r\n\r\n${data}\r\n\r\n`;
+      const encodedName = encodeFilename(file.name);
+      emailStr += `--${boundaryMixed}\r\nContent-Type: ${file.type || 'application/octet-stream'}; name=${encodedName}\r\nContent-Disposition: attachment; filename=${encodedName}\r\nContent-Transfer-Encoding: base64\r\n\r\n${chunkString(data)}\r\n`;
     }
     emailStr += `--${boundaryMixed}--\r\n`;
   }
