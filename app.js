@@ -123,7 +123,7 @@ function chunkString(str, len = 76) {
 function encodeFilename(str) {
   if (!str) return '""';
   if (!/[^\x00-\x7F]/.test(str)) return `"${str}"`;
-  return `"${encodeSubject(str)}"`; // Always wrap in quotes for strict SMTP parsers
+  return `"${encodeSubject(str)}"`; 
 }
 
 function encodeAddressList(str) {
@@ -538,7 +538,7 @@ async function openEmail(msgMeta, elNode) {
   document.getElementById('email-action-bar').style.display = 'none';
   document.getElementById('reply-section').style.display = 'none';
   
-  toggleReply(true); // Force clear/close reply editor if opening a new email
+  toggleReply(true); 
   loadingState(document.getElementById('email-viewer'));
 
   try {
@@ -675,7 +675,18 @@ async function renderEmail(msg) {
   const bodyContainer = el('div', 'email-body');
   if (bodyObj.type === 'text/html') {
     const iframe = el('iframe', '', '', { style: 'width:100%; height:600px; border:1px solid var(--border); background:#fff; border-radius:8px;', sandbox: 'allow-popups allow-popups-to-escape-sandbox' });
-    iframe.setAttribute('srcdoc', htmlData);
+    
+    // Inject base target=_blank to force all iframe links to open in a new tab
+    let safeHtml = htmlData;
+    if (!/<base\s/i.test(safeHtml)) {
+       if (/<head[^>]*>/i.test(safeHtml)) {
+           safeHtml = safeHtml.replace(/(<head[^>]*>)/i, '$1<base target="_blank">');
+       } else {
+           safeHtml = '<base target="_blank">' + safeHtml;
+       }
+    }
+    
+    iframe.setAttribute('srcdoc', safeHtml);
     bodyContainer.appendChild(iframe);
   } else {
     bodyContainer.appendChild(linkify(htmlData));
