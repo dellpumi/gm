@@ -7,7 +7,7 @@ function el(tag, className = '', textContent = '', attributes = {}) {
   const e = document.createElement(tag);
   if (className) e.className = className;
   if (textContent) e.textContent = textContent;
-  for (const [key, val] of Object.entries(attributes)) {
+  for (const[key, val] of Object.entries(attributes)) {
     if (key === 'style') e.style.cssText = val;
     else if (key.startsWith('data-')) e.setAttribute(key, val);
     else e[key] = val;
@@ -123,7 +123,8 @@ function chunkString(str, len = 76) {
 function encodeFilename(str) {
   if (!str) return '""';
   if (!/[^\x00-\x7F]/.test(str)) return `"${str}"`;
-  return `"${encodeSubject(str)}"`; 
+  // Do NOT wrap encoded subjects in quotes, RFC 2047 strict compliance
+  return encodeSubject(str); 
 }
 
 function encodeAddressList(str) {
@@ -479,7 +480,7 @@ async function loadEmails(label, loadMore = false) {
       gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`)
     ));
 
-    State.mail.items = [...State.mail.items, ...newMsgs];
+    State.mail.items =[...State.mail.items, ...newMsgs];
     renderEmailList(newMsgs, !loadMore);
     if (State.mail.pageToken) btnMore.style.display = 'block';
 
@@ -676,7 +677,6 @@ async function renderEmail(msg) {
   if (bodyObj.type === 'text/html') {
     const iframe = el('iframe', '', '', { style: 'width:100%; height:600px; border:1px solid var(--border); background:#fff; border-radius:8px;', sandbox: 'allow-popups allow-popups-to-escape-sandbox' });
     
-    // Inject base target=_blank to force all iframe links to open in a new tab
     let safeHtml = htmlData;
     if (!/<base\s/i.test(safeHtml)) {
        if (/<head[^>]*>/i.test(safeHtml)) {
