@@ -555,7 +555,12 @@ function renderEmailList(msgs, clearFirst) {
     
     const fromStr = decodeEntities(decodeRFC2047(headers['From'] || 'Unknown'));
     const toStr = decodeEntities(decodeRFC2047(headers['To'] || 'Unknown'));
-    let displayUser = State.mail.label === 'SENT' ? 'To: ' + (toStr.replace(/<.*>/, '').trim() || toStr) : fromStr.replace(/<.*>/, '').trim() || fromStr;
+    // For SENT: extract the first recipient's display name (or email if no name)
+    let sentTo = toStr;
+    const firstRecipientMatch = toStr.match(/^"?([^"<,]+)"?\s*</) || toStr.match(/^([^<,]+)/);
+    if (firstRecipientMatch) sentTo = firstRecipientMatch[1].trim().replace(/^"|"$/g, '');
+    if (!sentTo) sentTo = toStr.split(',')[0].trim();
+    let displayUser = State.mail.label === 'SENT' ? 'To: ' + sentTo : fromStr.replace(/<[^>]*>/, '').trim() || fromStr;
     const ts = formatTimestamp(headers['Date']);
 
     const div = el('div', `email-item ${isUnread ? 'unread' : ''}`);
@@ -696,6 +701,8 @@ async function renderEmail(msg) {
   let htmlData = bodyObj.data;
   
   const { atts, inlines } = getAttachmentsAndInlines(msg.payload);
+  console.log('[Aether] Payload mimeType:', msg.payload?.mimeType, '| Parts:', msg.payload?.parts?.length);
+  console.log('[Aether] Attachments found:', atts.length, atts.map(a => a.filename), '| Inlines:', inlines.length);
 
   for (const inline of inlines) {
     if (htmlData.includes(`cid:${inline.id}`)) {
@@ -775,12 +782,17 @@ let cleanHtml = htmlData;
     btnShow.onclick = () => {
       const iframe = bodyContainer.querySelector('iframe');
       if (iframe) {
-        const idoc = iframe.contentDocument || iframe.contentWindow.document;
-        idoc.querySelectorAll('img[data-blocked-src]').forEach(i => {
-          i.setAttribute('src', i.getAttribute('data-blocked-src'));
-          i.removeAttribute('data-blocked-src');
-          i.style.border = '';
-        });
+        // Rebuild srcdoc: for each blocked img, restore the real src and remove the placeholder.
+        // We do string replacement on safeHtml because mutating a srcdoc iframe's live DOM
+        // is unreliable — the only guaranteed way is to reassign srcdoc.
+        let unblockedHtml = safeHtml;
+        // Remove the placeholder src="data:image/svg..." attribute
+        unblockedHtml = unblockedHtml.replace(/ src="data:image\/svg\+xml;charset=UTF-8[^"]*"/g, '');
+        // Rename data-blocked-src back to src
+        unblockedHtml = unblockedHtml.replace(/ data-blocked-src="/g, ' src="');
+        // Remove the dashed border style added to blocked images
+        unblockedHtml = unblockedHtml.replace(/ style="border: 1px dashed var\(--border\);"/g, '');
+        iframe.setAttribute('srcdoc', unblockedHtml);
       }
       banner.style.display = 'none';
     };
