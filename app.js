@@ -151,7 +151,13 @@ function utf8ToBase64url(str) {
 }
 
 function utf8ToBase64(str) {
-  return btoa(unescape(encodeURIComponent(str)));
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(bin);
 }
 
 function encodeSubject(str) {
@@ -751,7 +757,7 @@ let cleanHtml = htmlData;
   const bodyContainer = el('div', 'email-body');
   if (bodyObj.type === 'text/html') {
     // allow-same-origin is critical here so the Display Images button can access the iframe document safely
-    const iframe = el('iframe', '', '', { style: 'width:100%; height:600px; border:1px solid var(--border); background:#fff; border-radius:8px;', sandbox: 'allow-popups allow-popups-to-escape-sandbox allow-same-origin' });
+    const iframe = el('iframe', '', '', { style: 'width:100%; min-height:300px; height:600px; border:1px solid var(--border); background:#fff; border-radius:8px; flex-shrink:0;', sandbox: 'allow-popups allow-popups-to-escape-sandbox allow-same-origin' });
     iframe.setAttribute('srcdoc', safeHtml);
     bodyContainer.appendChild(iframe);
   } else {
@@ -779,7 +785,8 @@ let cleanHtml = htmlData;
       banner.style.display = 'none';
     };
     banner.append(msgText, btnShow);
-    headerSec.insertAdjacentElement('afterend', banner);
+    // banner will be inserted after headerSec once it's in the DOM (see viewer.append below)
+    headerSec._pendingBanner = banner;
   }
 
   if (atts.length > 0) {
@@ -818,6 +825,11 @@ let cleanHtml = htmlData;
   }
 
   viewer.append(headerSec, scrollWrapper);
+  // Now headerSec is in the DOM — insert the image banner right after it
+  if (headerSec._pendingBanner) {
+    headerSec.insertAdjacentElement('afterend', headerSec._pendingBanner);
+    delete headerSec._pendingBanner;
+  }
 
   const actionBar = document.getElementById('email-action-bar');
   actionBar.innerHTML = '';
