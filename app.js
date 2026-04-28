@@ -65,6 +65,22 @@ const padB64 = str => {
   return b64;
 };
 
+
+function decodeB64(str) {
+  if (!str) return '';
+  try {
+    const bin = atob(padB64(str));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) {
+      bytes[i] = bin.charCodeAt(i);
+    }
+    return new TextDecoder('utf-8').decode(bytes);
+  } catch (e) {
+    console.error('Failed to decode base64:', e);
+    return str; // Fallback
+  }
+}
+
 // Smart thumbnail icon selector based on MIME/Extension
 function getFileIcon(mime, filename) {
   if (!mime) mime = '';
