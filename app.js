@@ -652,6 +652,9 @@ function getAttachmentsAndInlines(payload) {
     const cidHeader = headers.find(h => h.name.toLowerCase() === 'content-id');
     const hasAttachmentId = !!(part.body && part.body.attachmentId);
 
+    // Content-Disposition: attachment wins over Content-ID (Outlook sends both)
+    const isExplicitAttachment = /^\s*attachment/i.test(dispHeader?.value || '');
+
     const isTextOrHtml = mimeType === 'text/plain' || mimeType === 'text/html';
     const isBodyContainer = isTextOrHtml && !filename && !hasAttachmentId;
 
@@ -664,10 +667,11 @@ function getAttachmentsAndInlines(payload) {
         mime: mimeType
       };
 
-      if (cidHeader) {
+      // If explicitly marked as attachment (even with CID), treat as attachment
+      if (cidHeader && !isExplicitAttachment) {
         item.id = cidHeader.value.replace(/[<>]/g, '');
         inlines.push(item);
-      } else if (filename || hasAttachmentId) {
+      } else if (filename || hasAttachmentId || isExplicitAttachment) {
         atts.push(item);
       }
     }
@@ -701,8 +705,6 @@ async function renderEmail(msg) {
   let htmlData = bodyObj.data;
   
   const { atts, inlines } = getAttachmentsAndInlines(msg.payload);
-  console.log('[Aether] Payload mimeType:', msg.payload?.mimeType, '| Parts:', msg.payload?.parts?.length);
-  console.log('[Aether] Attachments found:', atts.length, atts.map(a => a.filename), '| Inlines:', inlines.length);
 
   for (const inline of inlines) {
     if (htmlData.includes(`cid:${inline.id}`)) {
@@ -761,11 +763,29 @@ let cleanHtml = htmlData;
      }
   }
 
+  // Build the original (images-blocked) and unblocked HTML upfront
+  const unblockedHtml = safeHtml
+    .replace(/ src="data:image\/svg\+xml;charset=UTF-8[^"]*"/g, '')
+    .replace(/ data-blocked-src="/g, ' src="')
+    .replace(/ style="border: 1px dashed var\(--border\);"/g, '');
+
+  // Use a helper to load HTML into iframe via Blob URL (avoids srcdoc null-origin issues)
+  function loadIframeHtml(iframe, html) {
+    const prev = iframe._blobUrl;
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    iframe._blobUrl = url;
+    iframe.src = url;
+    if (prev) setTimeout(() => URL.revokeObjectURL(prev), 5000);
+  }
+
   const bodyContainer = el('div', 'email-body');
   if (bodyObj.type === 'text/html') {
-    // allow-same-origin is critical here so the Display Images button can access the iframe document safely
-    const iframe = el('iframe', '', '', { style: 'width:100%; min-height:300px; height:600px; border:1px solid var(--border); background:#fff; border-radius:8px; flex-shrink:0;', sandbox: 'allow-popups allow-popups-to-escape-sandbox allow-same-origin' });
-    iframe.setAttribute('srcdoc', safeHtml);
+    // No sandbox: external images need network access; links open via base target=_blank
+    const iframe = el('iframe', '', '', {
+      style: 'width:100%; min-height:300px; height:600px; border:1px solid var(--border); background:#fff; border-radius:8px; flex-shrink:0;'
+    });
+    loadIframeHtml(iframe, safeHtml);
     bodyContainer.appendChild(iframe);
   } else {
     bodyContainer.innerHTML = htmlData;
@@ -777,23 +797,11 @@ let cleanHtml = htmlData;
     const banner = el('div', 'image-block-banner', '', {
       style: 'background: var(--surface2); padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; color: var(--text2); margin-bottom: 16px; border-radius: 8px;'
     });
-    const msgText = el('span', '', '🖼️ Images are hidden to protect your privacy.');
+    const msgText = el('span', '', '\uD83D\uDDBC\uFE0F Images are hidden to protect your privacy.');
     const btnShow = el('button', 'action-btn', 'Display Images', { style: 'font-weight: 500;' });
     btnShow.onclick = () => {
       const iframe = bodyContainer.querySelector('iframe');
-      if (iframe) {
-        // Rebuild srcdoc: for each blocked img, restore the real src and remove the placeholder.
-        // We do string replacement on safeHtml because mutating a srcdoc iframe's live DOM
-        // is unreliable — the only guaranteed way is to reassign srcdoc.
-        let unblockedHtml = safeHtml;
-        // Remove the placeholder src="data:image/svg..." attribute
-        unblockedHtml = unblockedHtml.replace(/ src="data:image\/svg\+xml;charset=UTF-8[^"]*"/g, '');
-        // Rename data-blocked-src back to src
-        unblockedHtml = unblockedHtml.replace(/ data-blocked-src="/g, ' src="');
-        // Remove the dashed border style added to blocked images
-        unblockedHtml = unblockedHtml.replace(/ style="border: 1px dashed var\(--border\);"/g, '');
-        iframe.setAttribute('srcdoc', unblockedHtml);
-      }
+      if (iframe) loadIframeHtml(iframe, unblockedHtml);
       banner.style.display = 'none';
     };
     banner.append(msgText, btnShow);
