@@ -575,6 +575,18 @@ function renderEmailList(msgs, clearFirst) {
     const isUnread = m.labelIds && m.labelIds.includes('UNREAD');
     
     const rawTo = headers['To'] || 'Unknown';
+
+    if (State.mail.label === 'SENT') {
+      console.log('[Aether] raw To:', rawTo);
+      console.log('[Aether] char codes (first 30):', Array.from(rawTo.slice(0,30)).map(c => c.charCodeAt(0)));
+      const afterFix = fixDoubleEncodedUtf8(rawTo);
+      console.log('[Aether] after fixDoubleEncoded:', afterFix);
+      const afterRFC = decodeRFC2047(afterFix);
+      console.log('[Aether] after decodeRFC2047:', afterRFC);
+      const afterEnt = decodeEntities(afterRFC);
+      console.log('[Aether] after decodeEntities:', afterEnt);
+    }
+
     const toStr = decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(rawTo)));
     const fromStr = decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(headers['From'] || 'Unknown')));
 
