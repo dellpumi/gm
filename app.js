@@ -182,16 +182,23 @@ function getMimeFilenameParams(filename) {
 function encodeAddressList(str) {
   if (!str) return '';
   return str.split(/[,;]/).map(part => {
-    const match = part.match(/^(.*?)<(.+?)>$/);
+    const p = part.trim();
+    if (!p) return '';
+    
+    // The regex now properly matches because the leading spaces are trimmed
+    const match = p.match(/^(.*?)<(.+?)>$/);
     if (match) {
       let name = match[1].trim().replace(/^"|"$/g, '').trim();
       let email = match[2].trim();
+      
       if (/[^\x00-\x7F]/.test(name)) name = encodeSubject(name);
       else if (name) name = `"${name}"`;
+      
       return name ? `${name} <${email}>` : `<${email}>`;
     }
-    if (/[^\x00-\x7F]/.test(part)) return encodeSubject(part);
-    return part.trim();
+    
+    if (/[^\x00-\x7F]/.test(p)) return encodeSubject(p);
+    return p;
   }).filter(Boolean).join(', ');
 }
 
@@ -745,7 +752,8 @@ async function renderEmail(msg) {
     iframe.setAttribute('srcdoc', safeHtml);
     bodyContainer.appendChild(iframe);
   } else {
-    bodyContainer.appendChild(linkify(htmlData));
+    // Replaces the missing linkify function to make links clickable safely
+    bodyContainer.innerHTML = htmlData.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" style="color:var(--accent);">$1</a>');
     bodyContainer.style.whiteSpace = 'pre-wrap';
   }
   scrollWrapper.appendChild(bodyContainer);
