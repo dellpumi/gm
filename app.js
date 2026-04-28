@@ -142,6 +142,27 @@ function decodeEntities(encodedString) {
   return textArea.value;
 }
 
+// Fix headers that contain raw UTF-8 bytes misread as Latin-1 (double-encoding).
+// e.g. "IstvÃ¡n" -> "István". This happens when the Gmail API returns unencoded
+// UTF-8 bytes in headers that were stored without proper RFC2047 encoding.
+function fixDoubleEncodedUtf8(str) {
+  if (!str) return str;
+  // Only attempt repair if the string contains typical Latin-1 reinterpretation artifacts.
+  // The pattern: bytes > 0xC0 followed by bytes in 0x80–0xBF range appearing as Ã/Â etc.
+  try {
+    const bytes = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) {
+      const code = str.charCodeAt(i);
+      if (code > 255) return str; // Contains real Unicode — not double-encoded Latin-1
+      bytes[i] = code;
+    }
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return decoded;
+  } catch (e) {
+    return str; // Not valid UTF-8 when treated as Latin-1 bytes — leave as-is
+  }
+}
+
 function utf8ToBase64url(str) {
   const bytes = new TextEncoder().encode(str);
   let bin = '';
@@ -554,27 +575,14 @@ function renderEmailList(msgs, clearFirst) {
     const isUnread = m.labelIds && m.labelIds.includes('UNREAD');
     
     const rawTo = headers['To'] || 'Unknown';
-    const afterRFC2047 = decodeRFC2047(rawTo);
-    const toStr = decodeEntities(afterRFC2047);
-    const fromStr = decodeEntities(decodeRFC2047(headers['From'] || 'Unknown'));
-
-    if (State.mail.label === 'SENT') {
-      console.log('[Aether SENT name] raw To header      :', rawTo);
-      console.log('[Aether SENT name] after decodeRFC2047 :', afterRFC2047);
-      console.log('[Aether SENT name] after decodeEntities :', toStr);
-    }
+    const toStr = decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(rawTo)));
+    const fromStr = decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(headers['From'] || 'Unknown')));
 
     // For SENT: extract the first recipient's display name (or email if no name)
     let sentTo = toStr;
     const firstRecipientMatch = toStr.match(/^"?([^"<,]+)"?\s*</) || toStr.match(/^([^<,]+)/);
-    if (State.mail.label === 'SENT') {
-      console.log('[Aether SENT name] regex match result  :', firstRecipientMatch?.[1]);
-    }
     if (firstRecipientMatch) sentTo = firstRecipientMatch[1].trim().replace(/^"|"$/g, '');
     if (!sentTo) sentTo = toStr.split(',')[0].trim();
-    if (State.mail.label === 'SENT') {
-      console.log('[Aether SENT name] final sentTo        :', sentTo);
-    }
     let displayUser = State.mail.label === 'SENT' ? 'To: ' + sentTo : fromStr.replace(/<[^>]*>/, '').trim() || fromStr;
     const ts = formatTimestamp(headers['Date']);
 
@@ -703,7 +711,7 @@ async function renderEmail(msg) {
   viewer.innerHTML = ''; 
   
   const headers = {};
-  (msg.payload?.headers || []).forEach(h => headers[h.name] = decodeRFC2047(h.value));
+  (msg.payload?.headers || []).forEach(h => headers[h.name] = decodeRFC2047(fixDoubleEncodedUtf8(h.value)));
 
   const headerSec = el('div', 'email-header-section');
   const dateLabel = State.mail.label === 'SENT' ? 'Date sent' : 'Date received';
