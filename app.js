@@ -142,24 +142,51 @@ function decodeEntities(encodedString) {
   return textArea.value;
 }
 
-// Fix headers that contain raw UTF-8 bytes misread as Latin-1 (double-encoding).
-// e.g. "IstvÃ¡n" -> "István". This happens when the Gmail API returns unencoded
-// UTF-8 bytes in headers that were stored without proper RFC2047 encoding.
+// Reverse-map Windows-1252 special chars (0x80–0x9F range) back to their byte values.
+// These appear when UTF-8 bytes were misread as cp1252 (e.g. 0x83 -> ƒ U+0192).
+const CP1252_TO_BYTE = {
+  0x20AC:0x80, 0x201A:0x82, 0x0192:0x83, 0x201E:0x84, 0x2026:0x85,
+  0x2020:0x86, 0x2021:0x87, 0x02C6:0x88, 0x2030:0x89, 0x0160:0x8A,
+  0x2039:0x8B, 0x0152:0x8C, 0x017D:0x8E, 0x2018:0x91, 0x2019:0x92,
+  0x201C:0x93, 0x201D:0x94, 0x2022:0x95, 0x2013:0x96, 0x2014:0x97,
+  0x02DC:0x98, 0x2122:0x99, 0x0161:0x9A, 0x203A:0x9B, 0x0153:0x9C,
+  0x017E:0x9E, 0x0178:0x9F
+};
+
+function cp1252StringToBytes(str) {
+  const bytes = new Uint8Array(str.length);
+  for (let i = 0; i < str.length; i++) {
+    const cp = str.charCodeAt(i);
+    if (cp in CP1252_TO_BYTE) bytes[i] = CP1252_TO_BYTE[cp];
+    else if (cp <= 0xFF) bytes[i] = cp;
+    else return null; // Unmappable — not cp1252
+  }
+  return bytes;
+}
+
+// Fix headers triple-encoded as UTF-8 -> cp1252 -> UTF-8 -> cp1252.
+// The Gmail API returns raw UTF-8 bytes in headers when senders don't use RFC2047;
+// JavaScript then reads those as cp1252, producing e.g. "IstvÃƒÂ¡n" for "István".
 function fixDoubleEncodedUtf8(str) {
   if (!str) return str;
-  // Only attempt repair if the string contains typical Latin-1 reinterpretation artifacts.
-  // The pattern: bytes > 0xC0 followed by bytes in 0x80–0xBF range appearing as Ã/Â etc.
   try {
-    const bytes = new Uint8Array(str.length);
-    for (let i = 0; i < str.length; i++) {
-      const code = str.charCodeAt(i);
-      if (code > 255) return str; // Contains real Unicode — not double-encoded Latin-1
-      bytes[i] = code;
-    }
-    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    return decoded;
+    // Pass 1: reverse cp1252 -> get bytes (these are still double-encoded UTF-8)
+    const bytes1 = cp1252StringToBytes(str);
+    if (!bytes1) return str;
+    const s2 = new TextDecoder('utf-8', { fatal: true }).decode(bytes1);
+    // Pass 2: reverse cp1252 again -> get original UTF-8 bytes
+    const bytes2 = cp1252StringToBytes(s2);
+    if (!bytes2) return str;
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes2);
   } catch (e) {
-    return str; // Not valid UTF-8 when treated as Latin-1 bytes — leave as-is
+    // Not triple-encoded — try single-pass (double-encoded)
+    try {
+      const bytes = cp1252StringToBytes(str);
+      if (!bytes) return str;
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch (e2) {
+      return str;
+    }
   }
 }
 
@@ -575,18 +602,6 @@ function renderEmailList(msgs, clearFirst) {
     const isUnread = m.labelIds && m.labelIds.includes('UNREAD');
     
     const rawTo = headers['To'] || 'Unknown';
-
-    if (State.mail.label === 'SENT') {
-      console.log('[Aether] raw To:', rawTo);
-      console.log('[Aether] char codes (first 30):', Array.from(rawTo.slice(0,30)).map(c => c.charCodeAt(0)));
-      const afterFix = fixDoubleEncodedUtf8(rawTo);
-      console.log('[Aether] after fixDoubleEncoded:', afterFix);
-      const afterRFC = decodeRFC2047(afterFix);
-      console.log('[Aether] after decodeRFC2047:', afterRFC);
-      const afterEnt = decodeEntities(afterRFC);
-      console.log('[Aether] after decodeEntities:', afterEnt);
-    }
-
     const toStr = decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(rawTo)));
     const fromStr = decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(headers['From'] || 'Unknown')));
 
