@@ -151,15 +151,13 @@ function utf8ToBase64url(str) {
 }
 
 function utf8ToBase64(str) {
-  const bytes = new TextEncoder().encode(str);
-  let bin = '';
-  const chunkSize = 0x8000; 
-  for (let i = 0; i < bytes.length; i += chunkSize) { bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize)); }
-  return btoa(bin);
+  return btoa(unescape(encodeURIComponent(str)));
 }
 
 function encodeSubject(str) {
   if (!str) return '';
+  // Don't encode if it is strictly ASCII
+  if (!/[^\x00-\x7F]/.test(str)) return str;
   return `=?UTF-8?B?${utf8ToBase64(str)}?=`;
 }
 
@@ -185,7 +183,6 @@ function encodeAddressList(str) {
     const p = part.trim();
     if (!p) return '';
     
-    // The regex now properly matches because the leading spaces are trimmed
     const match = p.match(/^(.*?)<(.+?)>$/);
     if (match) {
       let name = match[1].trim().replace(/^"|"$/g, '').trim();
@@ -608,74 +605,63 @@ function getEmailHtml(payload) {
   return res;
 }
 
-// Deep, strict inspection to pull out ALL binary format attachments reliably
 function getAttachmentsAndInlines(payload) {
-  const atts =[];
+  const atts = [];
   const inlines =[];
 
   function walk(part) {
     if (!part) return;
 
-    if (part.mimeType && part.mimeType.startsWith('multipart/')) {
-      (part.parts ||[]).forEach(walk);
+    const mimeType = part.mimeType || '';
+    const headers = part.headers ||[];
+
+    // Recurse into children if it's a multipart container
+    if (mimeType.startsWith('multipart/')) {
+      if (part.parts) part.parts.forEach(walk);
       return;
     }
 
     let filename = part.filename || '';
-    const headers = part.headers ||[];
     
+    // Fallback: Try to get filename from Content-Disposition or Content-Type
     const dispHeader = headers.find(h => h.name.toLowerCase() === 'content-disposition');
-    const cidHeader = headers.find(h => h.name.toLowerCase() === 'content-id');
-    const typeHeader = headers.find(h => h.name.toLowerCase() === 'content-type');
-
-    if (!filename && dispHeader) {
-      const match = dispHeader.value.match(/filename\*\s*=\s*[^']+'[^']*'([^;\s]+)/i);
-      if (match) filename = decodeURIComponent(match[1]);
-    }
     if (!filename && dispHeader) {
       const match = dispHeader.value.match(/filename\s*=\s*"?([^";]+)"?/i);
       if (match) filename = match[1].trim();
     }
-    if (!filename && typeHeader) {
-      const match = typeHeader.value.match(/name\*\s*=\s*[^']+'[^']*'([^;\s]+)/i);
-      if (match) filename = decodeURIComponent(match[1]);
-    }
+    const typeHeader = headers.find(h => h.name.toLowerCase() === 'content-type');
     if (!filename && typeHeader) {
       const match = typeHeader.value.match(/name\s*=\s*"?([^";]+)"?/i);
       if (match) filename = match[1].trim();
     }
 
-    const hasAttachmentId = !!part.body?.attachmentId;
-    const isExplicitAttachment = dispHeader && dispHeader.value.toLowerCase().startsWith('attachment');
-    const isInline = cidHeader || (dispHeader && dispHeader.value.toLowerCase().startsWith('inline'));
+    // Decode RFC2047 filename
+    if (filename) filename = decodeRFC2047(filename).replace(/(^"|"$)/g, '').trim();
 
-    // Critical fix: do not use !hasInlineData here, email body DOES have inline data!
-    const isTextOrHtml = part.mimeType === 'text/plain' || part.mimeType === 'text/html';
-    const isBodyContainer = isTextOrHtml && !filename && !hasAttachmentId && !isExplicitAttachment;
+    const cidHeader = headers.find(h => h.name.toLowerCase() === 'content-id');
+    const hasAttachmentId = !!(part.body && part.body.attachmentId);
+
+    const isTextOrHtml = mimeType === 'text/plain' || mimeType === 'text/html';
+    const isBodyContainer = isTextOrHtml && !filename && !hasAttachmentId;
 
     if (!isBodyContainer) {
-      filename = filename ? decodeRFC2047(filename).replace(/(^"|"$)/g, '').trim() : 'Unnamed_File';
+      const item = {
+        filename: filename || 'Unnamed_File',
+        attachmentId: part.body?.attachmentId,
+        data: part.body?.data,
+        size: part.body?.size || 0,
+        mime: mimeType
+      };
 
       if (cidHeader) {
-        inlines.push({
-          id: cidHeader.value.replace(/[<>]/g, ''),
-          attachmentId: part.body?.attachmentId,
-          data: part.body?.data,
-          mime: part.mimeType,
-          filename: filename
-        });
-      } else if (filename || hasAttachmentId || isExplicitAttachment) {
-        atts.push({
-          filename: filename,
-          attachmentId: part.body?.attachmentId,
-          data: part.body?.data,
-          size: part.body?.size || 0,
-          mime: part.mimeType
-        });
+        item.id = cidHeader.value.replace(/[<>]/g, '');
+        inlines.push(item);
+      } else if (filename || hasAttachmentId) {
+        atts.push(item);
       }
     }
     
-    (part.parts ||[]).forEach(walk);
+    if (part.parts) part.parts.forEach(walk);
   }
   
   walk(payload);
@@ -723,9 +709,10 @@ async function renderEmail(msg) {
     }
   }
 
-  let cleanHtml = htmlData;
+let cleanHtml = htmlData;
   if (bodyObj.type === 'text/plain') {
     htmlData = escHtml(htmlData).replace(/\r?\n/g, '<br>');
+    htmlData = htmlData.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" style="color:var(--accent);">$1</a>');
     cleanHtml = htmlData;
   } else {
     const bodyMatch = htmlData.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
@@ -736,27 +723,64 @@ async function renderEmail(msg) {
   State.reply.originalFrom = decodeEntities(headers['From'] || 'Unknown');
   State.reply.originalDate = headers['Date'] || '';
 
+  // Feature: Block external tracking images
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(htmlData, 'text/html');
+  let hasExternalImages = false;
+
+  doc.querySelectorAll('img').forEach(img => {
+    const src = img.getAttribute('src');
+    if (src && /^https?:\/\//i.test(src)) {
+      hasExternalImages = true;
+      img.setAttribute('data-blocked-src', src);
+      img.removeAttribute('src');
+      img.setAttribute('src', 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100" style="background:%23f0f0f0"%3E%3C/svg%3E');
+      img.style.border = '1px dashed var(--border)';
+    }
+  });
+
+  let safeHtml = doc.documentElement.innerHTML;
+  if (!/<base\s/i.test(safeHtml)) {
+     if (/<head[^>]*>/i.test(safeHtml)) {
+         safeHtml = safeHtml.replace(/(<head[^>]*>)/i, '$1<base target="_blank">');
+     } else {
+         safeHtml = '<base target="_blank">' + safeHtml;
+     }
+  }
+
   const bodyContainer = el('div', 'email-body');
   if (bodyObj.type === 'text/html') {
-    const iframe = el('iframe', '', '', { style: 'width:100%; height:600px; border:1px solid var(--border); background:#fff; border-radius:8px;', sandbox: 'allow-popups allow-popups-to-escape-sandbox' });
-    
-    let safeHtml = htmlData;
-    if (!/<base\s/i.test(safeHtml)) {
-       if (/<head[^>]*>/i.test(safeHtml)) {
-           safeHtml = safeHtml.replace(/(<head[^>]*>)/i, '$1<base target="_blank">');
-       } else {
-           safeHtml = '<base target="_blank">' + safeHtml;
-       }
-    }
-    
+    // allow-same-origin is critical here so the Display Images button can access the iframe document safely
+    const iframe = el('iframe', '', '', { style: 'width:100%; height:600px; border:1px solid var(--border); background:#fff; border-radius:8px;', sandbox: 'allow-popups allow-popups-to-escape-sandbox allow-same-origin' });
     iframe.setAttribute('srcdoc', safeHtml);
     bodyContainer.appendChild(iframe);
   } else {
-    // Replaces the missing linkify function to make links clickable safely
-    bodyContainer.innerHTML = htmlData.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" style="color:var(--accent);">$1</a>');
+    bodyContainer.innerHTML = htmlData;
     bodyContainer.style.whiteSpace = 'pre-wrap';
   }
   scrollWrapper.appendChild(bodyContainer);
+
+  if (hasExternalImages) {
+    const banner = el('div', 'image-block-banner', '', {
+      style: 'background: var(--surface2); padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; color: var(--text2); margin-bottom: 16px; border-radius: 8px;'
+    });
+    const msgText = el('span', '', '🖼️ Images are hidden to protect your privacy.');
+    const btnShow = el('button', 'action-btn', 'Display Images', { style: 'font-weight: 500;' });
+    btnShow.onclick = () => {
+      const iframe = bodyContainer.querySelector('iframe');
+      if (iframe) {
+        const idoc = iframe.contentDocument || iframe.contentWindow.document;
+        idoc.querySelectorAll('img[data-blocked-src]').forEach(i => {
+          i.setAttribute('src', i.getAttribute('data-blocked-src'));
+          i.removeAttribute('data-blocked-src');
+          i.style.border = '';
+        });
+      }
+      banner.style.display = 'none';
+    };
+    banner.append(msgText, btnShow);
+    headerSec.insertAdjacentElement('afterend', banner);
+  }
 
   if (atts.length > 0) {
     const attContainer = el('div', 'attachments');
