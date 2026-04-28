@@ -553,13 +553,28 @@ function renderEmailList(msgs, clearFirst) {
     (m.payload?.headers || []).forEach(h => headers[h.name] = h.value);
     const isUnread = m.labelIds && m.labelIds.includes('UNREAD');
     
+    const rawTo = headers['To'] || 'Unknown';
+    const afterRFC2047 = decodeRFC2047(rawTo);
+    const toStr = decodeEntities(afterRFC2047);
     const fromStr = decodeEntities(decodeRFC2047(headers['From'] || 'Unknown'));
-    const toStr = decodeEntities(decodeRFC2047(headers['To'] || 'Unknown'));
+
+    if (State.mail.label === 'SENT') {
+      console.log('[Aether SENT name] raw To header      :', rawTo);
+      console.log('[Aether SENT name] after decodeRFC2047 :', afterRFC2047);
+      console.log('[Aether SENT name] after decodeEntities :', toStr);
+    }
+
     // For SENT: extract the first recipient's display name (or email if no name)
     let sentTo = toStr;
     const firstRecipientMatch = toStr.match(/^"?([^"<,]+)"?\s*</) || toStr.match(/^([^<,]+)/);
+    if (State.mail.label === 'SENT') {
+      console.log('[Aether SENT name] regex match result  :', firstRecipientMatch?.[1]);
+    }
     if (firstRecipientMatch) sentTo = firstRecipientMatch[1].trim().replace(/^"|"$/g, '');
     if (!sentTo) sentTo = toStr.split(',')[0].trim();
+    if (State.mail.label === 'SENT') {
+      console.log('[Aether SENT name] final sentTo        :', sentTo);
+    }
     let displayUser = State.mail.label === 'SENT' ? 'To: ' + sentTo : fromStr.replace(/<[^>]*>/, '').trim() || fromStr;
     const ts = formatTimestamp(headers['Date']);
 
