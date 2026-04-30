@@ -257,16 +257,26 @@ function encodeAddressList(str) {
 document.addEventListener('DOMContentLoaded', async () => {
   setupEventListeners();
 
-  // Fix 6: Wipe session token when the tab/window is closed (not on reload/navigate)
-  // pagehide fires reliably on mobile/Safari too; beforeunload on desktop
-  function clearSessionOnClose(e) {
-    // Only clear if user is actually closing (not reloading/navigating within the app)
-    // sessionStorage is already tab-scoped, but we explicitly clear to remove the token
+  // Fix 6 & 14: Wipe session token when the tab/window is closed.
+  // We use a "heartbeat" key in sessionStorage written every second while the tab is alive.
+  // On page load, if no heartbeat exists (meaning the tab was closed, not just navigated),
+  // we wipe the auth token. Ctrl+Shift+T restores sessionStorage but the heartbeat
+  // will be missing because we cleared it on pagehide.
+  const HEARTBEAT_KEY = 'aether_tab_alive';
+  const tabWasRestored = !sessionStorage.getItem(HEARTBEAT_KEY);
+  if (tabWasRestored) {
+    Auth.clear(); // Wipe any lingering token from a restored (Ctrl+Shift+T) tab
+  }
+  // Mark this tab as alive immediately
+  sessionStorage.setItem(HEARTBEAT_KEY, '1');
+
+  // On page hide (close/navigate away), remove the heartbeat AND the token
+  function clearSessionOnClose() {
+    sessionStorage.removeItem(HEARTBEAT_KEY);
     Auth.clear();
     State.token = null;
   }
   window.addEventListener('pagehide', clearSessionOnClose);
-  // For desktop browsers that support it, also listen on beforeunload
   window.addEventListener('beforeunload', clearSessionOnClose);
 
   window.addEventListener('offline', () => toast('You are offline. Reconnect to sync.', 'error'));
@@ -366,6 +376,13 @@ function setupEventListeners() {
   document.getElementById('btn-cal-next').addEventListener('click', () => { State.calendar.date.setMonth(State.calendar.date.getMonth() + 1); loadCalendar(); });
   document.getElementById('btn-cal-today').addEventListener('click', () => { State.calendar.date = new Date(); loadCalendar(); });
   document.getElementById('btn-new-event').addEventListener('click', () => openEventModal());
+
+  // Fix 10: Mouse wheel on calendar changes months
+  document.getElementById('panel-calendar').addEventListener('wheel', (e) => {
+    e.preventDefault();
+    State.calendar.date.setMonth(State.calendar.date.getMonth() + (e.deltaY > 0 ? 1 : -1));
+    loadCalendar();
+  }, { passive: false });
   document.getElementById('btn-close-event').addEventListener('click', () => document.getElementById('event-modal').classList.remove('open'));
   document.getElementById('btn-cancel-event').addEventListener('click', () => document.getElementById('event-modal').classList.remove('open'));
   document.getElementById('btn-save-event').addEventListener('click', saveEvent);
@@ -665,16 +682,58 @@ async function openEmail(msgMeta, elNode) {
 
 function getEmailHtml(payload) {
   let res = { type: 'text/plain', data: '' };
+
+  // Extract charset from a Content-Type header value, e.g. "text/html; charset=iso-8859-2"
+  function extractCharset(headers) {
+    const ct = (headers || []).find(h => h.name.toLowerCase() === 'content-type');
+    if (!ct) return null;
+    const m = ct.value.match(/charset\s*=\s*["']?([^\s;"']+)/i);
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  // Decode base64 body data respecting the part's charset
+  function decodePartBody(data, charset) {
+    if (!data) return '';
+    const b64 = (data || '').replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
+    let padded = b64;
+    while (padded.length % 4) padded += '=';
+    try {
+      const bin = atob(padded);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      // Use the declared charset; fall back to utf-8
+      const enc = charset && charset !== 'utf-8' && charset !== 'utf8' ? charset : 'utf-8';
+      try {
+        return new TextDecoder(enc, { fatal: true }).decode(bytes);
+      } catch(e) {
+        // If declared charset fails, fall back to utf-8 lenient
+        return new TextDecoder('utf-8').decode(bytes);
+      }
+    } catch(e) {
+      return decodeB64(data); // original fallback
+    }
+  }
+
   function walk(part) {
     if (!part) return;
-    if (part.mimeType === 'text/html' && part.body?.data) { res = { type: 'text/html', data: decodeB64(part.body.data) }; return true; }
-    if (part.mimeType === 'text/plain' && part.body?.data && res.data === '') res = { type: 'text/plain', data: decodeB64(part.body.data) };
+    const charset = extractCharset(part.headers);
+    if (part.mimeType === 'text/html' && part.body?.data) {
+      res = { type: 'text/html', data: decodePartBody(part.body.data, charset) };
+      return true;
+    }
+    if (part.mimeType === 'text/plain' && part.body?.data && res.data === '') {
+      res = { type: 'text/plain', data: decodePartBody(part.body.data, charset) };
+    }
     if (part.parts) for (const p of part.parts) if (walk(p)) return true;
   }
+
   if (payload.body?.data && !payload.parts) {
-    res.data = decodeB64(payload.body.data);
+    const charset = extractCharset(payload.headers);
+    res.data = decodePartBody(payload.body.data, charset);
     res.type = payload.mimeType === 'text/html' ? 'text/html' : 'text/plain';
-  } else walk(payload);
+  } else {
+    walk(payload);
+  }
   return res;
 }
 
@@ -836,21 +895,44 @@ let cleanHtml = htmlData;
   State.reply.originalFrom = decodeEntities(headers['From'] || 'Unknown');
   State.reply.originalDate = headers['Date'] || '';
 
-  // Feature: Block external tracking images
+  // Feature: Block external tracking images + Fix 17: console logging
   const parser = new DOMParser();
   const doc = parser.parseFromString(htmlData, 'text/html');
   let hasExternalImages = false;
+  const blockedImageLog = [];
 
   doc.querySelectorAll('img').forEach(img => {
     const src = img.getAttribute('src');
     if (src && /^https?:\/\//i.test(src)) {
       hasExternalImages = true;
+      // Log the blocked image with context
+      const alt = img.getAttribute('alt') || '(no alt)';
+      const width = img.getAttribute('width') || 'unknown';
+      const height = img.getAttribute('height') || 'unknown';
+      let reason = 'External URL — blocked to prevent tracking pixel / privacy leak';
+      if (width === '1' || height === '1') reason = 'Tracking pixel (1x1) — blocked';
+      else if (width === '0' || height === '0') reason = 'Hidden tracking image (0px) — blocked';
+      blockedImageLog.push({ url: src, alt, size: `${width}x${height}`, reason });
+
       img.setAttribute('data-blocked-src', src);
       img.removeAttribute('src');
       img.setAttribute('src', 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100" style="background:%23f0f0f0"%3E%3C/svg%3E');
       img.style.border = '1px dashed var(--border)';
     }
   });
+
+  if (blockedImageLog.length > 0) {
+    console.group(`🛡️ Aether — ${blockedImageLog.length} external image(s) blocked in: "${decodeEntities(headers['Subject']) || '(no subject)'}"`);
+    blockedImageLog.forEach((entry, i) => {
+      console.group(`Image #${i + 1}`);
+      console.log('URL:   ', entry.url);
+      console.log('Alt:   ', entry.alt);
+      console.log('Size:  ', entry.size);
+      console.warn('Reason:', entry.reason);
+      console.groupEnd();
+    });
+    console.groupEnd();
+  }
 
   let safeHtml = doc.documentElement.innerHTML;
   if (!/<base\s/i.test(safeHtml)) {
@@ -905,41 +987,6 @@ let cleanHtml = htmlData;
     banner.append(msgText, btnShow);
     // banner will be inserted after headerSec once it's in the DOM (see viewer.append below)
     headerSec._pendingBanner = banner;
-  }
-
-  if (atts.length > 0) {
-    const attContainer = el('div', 'attachments');
-    attContainer.appendChild(el('div', 'attachments-title', `📎 Attachments (${atts.length})`));
-    const chips = el('div', 'attachment-chips');
-    
-    atts.forEach(a => {
-      const chip = el('div', 'attachment-chip');
-      const thumbArea = el('div', 'attachment-thumb-area');
-      const infoArea = el('div', 'attachment-info');
-      
-      infoArea.append(el('span', 'chip-name', a.filename), el('span', 'chip-size', formatBytes(a.size)));
-      
-      if (a.mime && a.mime.startsWith('image/')) {
-        const img = el('img', 'attachment-thumb');
-        thumbArea.appendChild(img);
-        if (a.data) {
-          img.src = `data:${a.mime};base64,${padB64(a.data)}`;
-        } else if (a.attachmentId) {
-          gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/attachments/${a.attachmentId}`)
-            .then(data => { img.src = `data:${a.mime};base64,${padB64(data.data)}`; })
-            .catch(() => { img.src = ''; }); 
-        }
-      } else {
-        thumbArea.textContent = getFileIcon(a.mime, a.filename);
-      }
-      
-      chip.append(thumbArea, infoArea);
-      chip.onclick = () => downloadAttachment(msg.id, a.attachmentId, a.filename, a.data, a.mime);
-      chips.appendChild(chip);
-    });
-    
-    attContainer.appendChild(chips);
-    scrollWrapper.appendChild(attContainer);
   }
 
   viewer.append(headerSec, scrollWrapper);
@@ -1277,11 +1324,36 @@ async function loadCalendar() {
     const calList = await gapi('GET', 'https://www.googleapis.com/calendar/v3/users/me/calendarList');
     State.calendar.calendars = calList.items ||[];
     
+    // Fix 12: Rebuild the calendar select properly each time
     const calSelect = document.getElementById('event-calendar');
     calSelect.innerHTML = '';
-    State.calendar.calendars.filter(c => c.accessRole === 'owner' || c.accessRole === 'writer').forEach(c => {
-      calSelect.appendChild(el('option', '', c.summary, { value: c.id }));
+    const writableCalendars = State.calendar.calendars.filter(c => c.accessRole === 'owner' || c.accessRole === 'writer');
+    writableCalendars.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.summary;
+      calSelect.appendChild(opt);
     });
+    // Ensure the select is enabled for new events by default
+    calSelect.disabled = false;
+
+    // Fix 11: Render calendar legend next to the "New Event" button
+    const legendContainer = document.getElementById('cal-legend');
+    if (legendContainer) {
+      legendContainer.innerHTML = '';
+      State.calendar.calendars.filter(c => c.selected !== false).forEach(c => {
+        const item = document.createElement('div');
+        item.className = 'cal-legend-item';
+        const dot = document.createElement('span');
+        dot.className = 'cal-legend-dot';
+        dot.style.backgroundColor = c.backgroundColor || '#5b8af0';
+        const label = document.createElement('span');
+        label.className = 'cal-legend-label';
+        label.textContent = c.summary;
+        item.append(dot, label);
+        legendContainer.appendChild(item);
+      });
+    }
   } catch (err) { toast('Error loading calendar list', 'error'); return; }
 
   renderCalendarGrid();
@@ -1433,8 +1505,13 @@ function openEventModal(event) {
   document.getElementById('event-desc').value = event?.description || '';
   
   const calSelect = document.getElementById('event-calendar');
-  calSelect.disabled = !!event; 
-  if (event?.calendarId) calSelect.value = event.calendarId;
+  // For new events: enable selection; for edits: lock to current calendar
+  calSelect.disabled = !!event;
+  if (event?.calendarId) {
+    calSelect.value = event.calendarId;
+  } else if (calSelect.options.length > 0) {
+    calSelect.selectedIndex = 0;
+  }
   
   const now = new Date();
   if (event) {

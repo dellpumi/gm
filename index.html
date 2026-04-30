@@ -65,6 +65,14 @@
     </div>
     <hr class="sidebar-divider">
     <div class="sidebar-section">
+      <div class="sidebar-label">Categories</div>
+      <div class="nav-item" data-panel="mail" data-label="CATEGORY_PROMOTIONS"><span>🏷️</span> Promotions</div>
+      <div class="nav-item" data-panel="mail" data-label="CATEGORY_SOCIAL"><span>👤</span> Social</div>
+      <div class="nav-item" data-panel="mail" data-label="CATEGORY_UPDATES"><span>🔔</span> Updates</div>
+      <div class="nav-item" data-panel="mail" data-label="CATEGORY_FORUMS"><span>💬</span> Forums</div>
+    </div>
+    <hr class="sidebar-divider">
+    <div class="sidebar-section">
       <div class="sidebar-label">Workspace</div>
       <div class="nav-item" data-panel="calendar" id="nav-calendar"><span>📅</span> Calendar</div>
       <div class="nav-item" data-panel="contacts" id="nav-contacts"><span>👥</span> Contacts</div>
@@ -88,7 +96,7 @@
         <input type="text" id="search-input" placeholder="Search current view...">
       </div>
       <div class="topbar-actions">
-        <div id="session-timer"><span style="color:var(--text2); display:flex; align-items:center;">version 2.2 - 2026.04.28 &nbsp;|&nbsp;</span> ⏱ <span id="timer-text" style="margin-left:4px;">--:--</span></div>
+        <div id="session-timer"><span style="color:var(--text2); display:flex; align-items:center;">version 2.4 - 2026.04.30 &nbsp;|&nbsp;</span> ⏱ <span id="timer-text" style="margin-left:4px;">--:--</span></div>
         <button class="icon-btn" id="btn-refresh" title="Refresh">↻</button>
       </div>
     </div>
@@ -132,6 +140,7 @@
             </div>
             <div class="cal-month-title" id="cal-title">Month Year</div>
             <button class="cal-today-btn" id="btn-cal-today">Today</button>
+            <div id="cal-legend" class="cal-legend"></div>
             <button class="new-event-btn" id="btn-new-event">+ New Event</button>
           </div>
           <div class="cal-grid-wrap">
