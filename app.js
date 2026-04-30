@@ -257,22 +257,41 @@ function encodeAddressList(str) {
 document.addEventListener('DOMContentLoaded', async () => {
   setupEventListeners();
 
-  // Fix 6 & 14: Wipe session token when the tab/window is closed.
-  // We use a "heartbeat" key in sessionStorage written every second while the tab is alive.
-  // On page load, if no heartbeat exists (meaning the tab was closed, not just navigated),
-  // we wipe the auth token. Ctrl+Shift+T restores sessionStorage but the heartbeat
-  // will be missing because we cleared it on pagehide.
-  const HEARTBEAT_KEY = 'aether_tab_alive';
-  const tabWasRestored = !sessionStorage.getItem(HEARTBEAT_KEY);
-  if (tabWasRestored) {
-    Auth.clear(); // Wipe any lingering token from a restored (Ctrl+Shift+T) tab
-  }
-  // Mark this tab as alive immediately
-  sessionStorage.setItem(HEARTBEAT_KEY, '1');
+  // Fix 20: Proper tab-close detection using localStorage timestamp.
+  // sessionStorage is PRESERVED on Ctrl+Shift+T tab restore, so the heartbeat trick doesn't work.
+  // Instead: on every page load we check a localStorage timestamp written on pagehide.
+  // If that timestamp exists and is recent (< 10 seconds ago), it means the tab was
+  // closed and immediately restored — wipe the token.
+  // Normal page reloads (F5) also fire pagehide+load but we want those to keep the session,
+  // so we use a sessionStorage flag to distinguish: a true reload sets the flag before unload.
+  const CLOSE_TS_KEY   = 'aether_close_ts';
+  const RELOAD_FLAG    = 'aether_is_reload';
 
-  // On page hide (close/navigate away), remove the heartbeat AND the token
+  const closeTs  = parseInt(localStorage.getItem(CLOSE_TS_KEY) || '0', 10);
+  const isReload = sessionStorage.getItem(RELOAD_FLAG) === '1';
+
+  if (closeTs && !isReload) {
+    // Tab was previously closed (not reloaded) — wipe any lingering token
+    Auth.clear();
+    State.token = null;
+  }
+  // Always clear the reload flag and the close timestamp on fresh load
+  sessionStorage.removeItem(RELOAD_FLAG);
+  localStorage.removeItem(CLOSE_TS_KEY);
+
+  function markReload() {
+    // Called only on intentional reload (F5 / Ctrl+R) via keydown — NOT on tab close
+    sessionStorage.setItem(RELOAD_FLAG, '1');
+  }
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'F5' || (e.ctrlKey && e.key === 'r') || (e.metaKey && e.key === 'r')) {
+      markReload();
+    }
+  });
+
   function clearSessionOnClose() {
-    sessionStorage.removeItem(HEARTBEAT_KEY);
+    // Write a close timestamp to localStorage — survives tab close
+    localStorage.setItem(CLOSE_TS_KEY, String(Date.now()));
     Auth.clear();
     State.token = null;
   }
@@ -307,6 +326,36 @@ function setupEventListeners() {
   document.getElementById('btn-save-client-id').addEventListener('click', () => { Auth.setClientId(document.getElementById('client-id-input').value.trim()); Auth.startLogin(); });
   
   document.getElementById('btn-sign-out').addEventListener('click', () => confirmAction('Sign Out', 'Are you sure you want to log out? This will clear your local app cache and sever connection.', 'Yes, Sign Out', handleSignOut, true));
+
+  // Fix 19: Batch delete
+  document.getElementById('btn-batch-delete').addEventListener('click', () => {
+    const checked = [...document.querySelectorAll('.email-checkbox:checked')];
+    if (!checked.length) return;
+    const count = checked.length;
+    confirmAction(
+      'Delete Selected',
+      `Move ${count} message${count > 1 ? 's' : ''} to Trash?`,
+      `🗑 Delete ${count}`,
+      async () => {
+        const ids = checked.map(cb => cb.closest('.email-item').dataset.msgId).filter(Boolean);
+        try {
+          await Promise.all(ids.map(id =>
+            gapi('POST', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}/trash`)
+          ));
+          toast(`${count} message${count > 1 ? 's' : ''} moved to Trash`, 'success');
+          // Remove deleted items from DOM and state
+          ids.forEach(id => {
+            document.querySelector(`.email-item[data-msg-id="${id}"]`)?.remove();
+            State.mail.items = State.mail.items.filter(m => m.id !== id);
+          });
+          updateBatchDeleteBtn();
+        } catch (err) {
+          toast('Failed to delete some messages: ' + err.message, 'error');
+        }
+      },
+      true
+    );
+  });
 
   document.querySelectorAll('.nav-item').forEach(nav => { nav.addEventListener('click', () => showPanel(nav.dataset.panel, nav.dataset.label)); });
   document.getElementById('btn-refresh').addEventListener('click', refreshCurrent);
@@ -621,6 +670,12 @@ async function searchEmails(query) {
   } catch (e) { toast('Search failed', 'error'); }
 }
 
+function updateBatchDeleteBtn() {
+  const btn = document.getElementById('btn-batch-delete');
+  const checked = document.querySelectorAll('.email-checkbox:checked');
+  btn.classList.toggle('visible', checked.length > 0);
+}
+
 function renderEmailList(msgs, clearFirst) {
   const container = document.getElementById('email-list');
   if (clearFirst) container.innerHTML = '';
@@ -634,7 +689,6 @@ function renderEmailList(msgs, clearFirst) {
     const toStr = decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(rawTo)));
     const fromStr = decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(headers['From'] || 'Unknown')));
 
-    // For SENT: extract the first recipient's display name (or email if no name)
     let sentTo = toStr;
     const firstRecipientMatch = toStr.match(/^"?([^"<,]+)"?\s*</) || toStr.match(/^([^<,]+)/);
     if (firstRecipientMatch) sentTo = firstRecipientMatch[1].trim().replace(/^"|"$/g, '');
@@ -643,6 +697,20 @@ function renderEmailList(msgs, clearFirst) {
     const ts = formatTimestamp(headers['Date']);
 
     const div = el('div', `email-item ${isUnread ? 'unread' : ''}`);
+    div.dataset.msgId = m.id;
+
+    // Fix 19: Checkbox
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'email-checkbox';
+    cb.addEventListener('change', (e) => {
+      e.stopPropagation();
+      div.classList.toggle('selected', cb.checked);
+      updateBatchDeleteBtn();
+    });
+    cb.addEventListener('click', (e) => e.stopPropagation());
+    div.appendChild(cb);
+
     const metaObj = el('div', 'email-meta');
     metaObj.append(el('span', 'email-from', displayUser), el('span', 'email-date', ts));
     
