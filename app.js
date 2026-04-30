@@ -257,6 +257,18 @@ function encodeAddressList(str) {
 document.addEventListener('DOMContentLoaded', async () => {
   setupEventListeners();
 
+  // Fix 6: Wipe session token when the tab/window is closed (not on reload/navigate)
+  // pagehide fires reliably on mobile/Safari too; beforeunload on desktop
+  function clearSessionOnClose(e) {
+    // Only clear if user is actually closing (not reloading/navigating within the app)
+    // sessionStorage is already tab-scoped, but we explicitly clear to remove the token
+    Auth.clear();
+    State.token = null;
+  }
+  window.addEventListener('pagehide', clearSessionOnClose);
+  // For desktop browsers that support it, also listen on beforeunload
+  window.addEventListener('beforeunload', clearSessionOnClose);
+
   window.addEventListener('offline', () => toast('You are offline. Reconnect to sync.', 'error'));
   window.addEventListener('online', () => toast('Back online!', 'success'));
 
@@ -756,6 +768,42 @@ async function renderEmail(msg) {
   
   const { atts, inlines } = getAttachmentsAndInlines(msg.payload);
 
+  // Fix 7: Render attachments ABOVE the email body
+  if (atts.length > 0) {
+    const attContainer = el('div', 'attachments');
+    attContainer.appendChild(el('div', 'attachments-title', `📎 Attachments (${atts.length})`));
+    const chips = el('div', 'attachment-chips');
+    
+    atts.forEach(a => {
+      const chip = el('div', 'attachment-chip');
+      const thumbArea = el('div', 'attachment-thumb-area');
+      const infoArea = el('div', 'attachment-info');
+      
+      infoArea.append(el('span', 'chip-name', a.filename), el('span', 'chip-size', formatBytes(a.size)));
+      
+      if (a.mime && a.mime.startsWith('image/')) {
+        const img = el('img', 'attachment-thumb');
+        thumbArea.appendChild(img);
+        if (a.data) {
+          img.src = `data:${a.mime};base64,${padB64(a.data)}`;
+        } else if (a.attachmentId) {
+          gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/attachments/${a.attachmentId}`)
+            .then(data => { img.src = `data:${a.mime};base64,${padB64(data.data)}`; })
+            .catch(() => { img.src = ''; }); 
+        }
+      } else {
+        thumbArea.textContent = getFileIcon(a.mime, a.filename);
+      }
+      
+      chip.append(thumbArea, infoArea);
+      chip.onclick = () => downloadAttachment(msg.id, a.attachmentId, a.filename, a.data, a.mime);
+      chips.appendChild(chip);
+    });
+    
+    attContainer.appendChild(chips);
+    scrollWrapper.appendChild(attContainer);
+  }
+
   for (const inline of inlines) {
     if (htmlData.includes(`cid:${inline.id}`)) {
       try {
@@ -1237,13 +1285,16 @@ async function loadCalendar() {
   } catch (err) { toast('Error loading calendar list', 'error'); return; }
 
   renderCalendarGrid();
-  const start = new Date(State.calendar.date.getFullYear(), State.calendar.date.getMonth(), 1).toISOString();
-  const end = new Date(State.calendar.date.getFullYear(), State.calendar.date.getMonth() + 1, 0, 23, 59, 59).toISOString();
+  // Expand query range by one week on each side to catch multi-day events that start before / end after the visible month
+  const viewStart = new Date(State.calendar.date.getFullYear(), State.calendar.date.getMonth(), 1);
+  const viewEnd   = new Date(State.calendar.date.getFullYear(), State.calendar.date.getMonth() + 1, 0, 23, 59, 59);
+  const queryStart = new Date(viewStart); queryStart.setDate(queryStart.getDate() - 7);
+  const queryEnd   = new Date(viewEnd);   queryEnd.setDate(queryEnd.getDate() + 7);
   
   try {
     const eventPromises = State.calendar.calendars.filter(c => c.selected !== false).map(async (c) => {
       try {
-        const data = await gapi('GET', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(c.id)}/events?timeMin=${start}&timeMax=${end}&singleEvents=true&orderBy=startTime&maxResults=100`);
+        const data = await gapi('GET', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(c.id)}/events?timeMin=${queryStart.toISOString()}&timeMax=${queryEnd.toISOString()}&singleEvents=true&orderBy=startTime&maxResults=200`);
         return (data.items ||[]).map(e => ({ ...e, backgroundColor: c.backgroundColor, foregroundColor: c.foregroundColor, calendarId: c.id }));
       } catch(err) { return[]; }
     });
@@ -1268,51 +1319,106 @@ function renderCalendarGrid(eventsToRender = null) {
   const month = State.calendar.date.getMonth();
   document.getElementById('cal-title').textContent = State.calendar.date.toLocaleString('default', { month: 'long', year: 'numeric' });
 
-  const firstDay = new Date(year, month, 1).getDay();
+  // Monday-first: getDay() returns 0=Sun..6=Sat; we want 0=Mon..6=Sun
+  const dayOfWeekMon = d => (d.getDay() + 6) % 7; // 0=Mon, 6=Sun
+
+  const firstDayOfMonth = new Date(year, month, 1);
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const prevDays = new Date(year, month, 0).getDate();
   const today = new Date();
 
   const wdContainer = document.getElementById('cal-weekdays');
-  wdContainer.innerHTML = '';['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach(d => wdContainer.appendChild(el('div', 'cal-weekday', d)));
+  wdContainer.innerHTML = '';
+  ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].forEach(d => wdContainer.appendChild(el('div', 'cal-weekday', d)));
+
+  // Build cell array (Monday-first)
+  const leadingBlanks = dayOfWeekMon(firstDayOfMonth); // how many cells before day 1
+  const cells = [];
+  for (let i = leadingBlanks - 1; i >= 0; i--) cells.push({ day: prevDays - i, month: month - 1, year: month === 0 ? year - 1 : year, current: false });
+  for (let d = 1; d <= daysInMonth; d++) cells.push({ day: d, month, year, current: true });
+  while (cells.length % 7 !== 0) {
+    const extra = cells.length - leadingBlanks - daysInMonth + 1;
+    cells.push({ day: extra, month: month + 1, year: month === 11 ? year + 1 : year, current: false });
+  }
+
+  const eventsData = eventsToRender || State.calendar.events;
+
+  // Normalize an event to a JS Date (date-only events use local midnight)
+  const toDate = str => str ? new Date(str.includes('T') ? str : str + 'T00:00:00') : null;
+  const stripTime = d => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+  // For each event, compute start/end as plain dates (all-day: end is exclusive so subtract 1 day)
+  const normalizedEvents = eventsData.map(e => {
+    const isAllDay = !e.start?.dateTime && !!e.start?.date;
+    let startD = stripTime(toDate(e.start?.dateTime || e.start?.date));
+    let endD = toDate(e.end?.dateTime || e.end?.date);
+    if (isAllDay && endD) {
+      // Google Calendar all-day end is exclusive — subtract one day
+      endD = new Date(endD.getTime() - 24 * 60 * 60 * 1000);
+    } else if (endD) {
+      endD = stripTime(endD);
+    } else {
+      endD = startD;
+    }
+    const isMultiDay = endD > startD;
+    return { ...e, _startD: startD, _endD: endD, _isAllDay: isAllDay, _isMultiDay: isMultiDay };
+  });
 
   const container = document.getElementById('cal-days');
   container.innerHTML = '';
-  let cells =[];
-  for (let i = firstDay - 1; i >= 0; i--) cells.push({ day: prevDays - i, current: false });
-  for (let d = 1; d <= daysInMonth; d++) cells.push({ day: d, current: true });
-  while (cells.length % 7 !== 0) cells.push({ day: cells.length - firstDay - daysInMonth + 1, current: false });
 
-  const eventsData = eventsToRender || State.calendar.events;
-  
   cells.forEach(cell => {
-    const div = el('div', `cal-day ${!cell.current ? 'other-month' : ''}`);
-    const isToday = cell.current && cell.day === today.getDate() && month === today.getMonth() && year === today.getFullYear();
+    const cellDate = new Date(cell.year, cell.month, cell.day);
+    const cellDateStripped = stripTime(cellDate);
+
+    const div = el('div', `cal-day${!cell.current ? ' other-month' : ''}`);
+    const isToday = cell.current && cell.day === today.getDate() && cell.month === today.getMonth() && cell.year === today.getFullYear();
     if (isToday) div.classList.add('today');
 
-    div.appendChild(el('div', 'day-num', cell.day));
+    div.appendChild(el('div', 'day-num', String(cell.day)));
 
-    if (cell.current) {
-      const dayEvents = eventsData.filter(e => {
-        const d = new Date(e.start?.dateTime || e.start?.date);
-        return d.getDate() === cell.day && d.getMonth() === month && d.getFullYear() === year;
-      });
-      dayEvents.forEach((e) => {
+    // Find events that span this cell date
+    const dayEvents = normalizedEvents.filter(e => {
+      return cellDateStripped >= e._startD && cellDateStripped <= e._endD;
+    });
+
+    dayEvents.forEach(e => {
+      let label = '';
+      let cssClass = 'cal-event';
+
+      if (e._isMultiDay) {
+        const isStart = cellDateStripped.getTime() === e._startD.getTime();
+        const isEnd = cellDateStripped.getTime() === e._endD.getTime();
+        if (isStart) {
+          cssClass += ' multiday-start';
+          label = (e.summary || 'No title');
+        } else if (isEnd) {
+          cssClass += ' multiday-end';
+          label = '↳ ' + (e.summary || 'No title');
+        } else {
+          cssClass += ' multiday-mid';
+          label = '— ' + (e.summary || 'No title');
+        }
+      } else {
         const time = e.start?.dateTime ? new Date(e.start.dateTime).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + ' ' : '';
-        const chip = el('div', 'cal-event', time + (e.summary || 'No title'));
-        chip.style.backgroundColor = e.backgroundColor || '#5b8af0';
-        chip.style.color = e.foregroundColor || '#fff';
-        
-        chip.addEventListener('click', (ev) => { ev.stopPropagation(); openEventModal(e); });
-        div.appendChild(chip);
-      });
-      div.addEventListener('dblclick', () => {
-        const dtStr = new Date(year, month, cell.day, 9, 0).toISOString().slice(0,16);
-        openEventModal();
-        document.getElementById('event-start').value = dtStr;
-        document.getElementById('event-end').value = new Date(new Date(year, month, cell.day, 10, 0)).toISOString().slice(0,16);
-      });
-    }
+        label = time + (e.summary || 'No title');
+      }
+
+      const chip = el('div', cssClass, label);
+      chip.style.backgroundColor = e.backgroundColor || '#5b8af0';
+      chip.style.color = e.foregroundColor || '#fff';
+      chip.title = (e.summary || 'No title') + (e._isMultiDay ? `\n${e._startD.toLocaleDateString()} – ${e._endD.toLocaleDateString()}` : '');
+      chip.addEventListener('click', (ev) => { ev.stopPropagation(); openEventModal(e); });
+      div.appendChild(chip);
+    });
+
+    div.addEventListener('dblclick', () => {
+      const dtStr = new Date(cell.year, cell.month, cell.day, 9, 0).toISOString().slice(0,16);
+      openEventModal();
+      document.getElementById('event-start').value = dtStr;
+      document.getElementById('event-end').value = new Date(new Date(cell.year, cell.month, cell.day, 10, 0)).toISOString().slice(0,16);
+    });
+
     container.appendChild(div);
   });
 }
@@ -1331,8 +1437,23 @@ function openEventModal(event) {
   if (event?.calendarId) calSelect.value = event.calendarId;
   
   const now = new Date();
-  document.getElementById('event-start').value = event?.start?.dateTime?.slice(0,16) || now.toISOString().slice(0,16);
-  document.getElementById('event-end').value = event?.end?.dateTime?.slice(0,16) || new Date(now.getTime()+3600000).toISOString().slice(0,16);
+  if (event) {
+    // Support both timed (dateTime) and all-day (date) events
+    const startRaw = event.start?.dateTime || (event.start?.date ? event.start.date + 'T00:00:00' : null);
+    const endRaw   = event.end?.dateTime   || (event.end?.date   ? event.end.date   + 'T00:00:00' : null);
+    // For all-day events Google end is exclusive — show the real last day to user
+    let endVal = endRaw;
+    if (!event.start?.dateTime && event.end?.date) {
+      const d = new Date(event.end.date + 'T00:00:00');
+      d.setDate(d.getDate() - 1);
+      endVal = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + 'T00:00:00';
+    }
+    document.getElementById('event-start').value = startRaw?.slice(0,16) || now.toISOString().slice(0,16);
+    document.getElementById('event-end').value   = endVal?.slice(0,16)   || new Date(now.getTime()+3600000).toISOString().slice(0,16);
+  } else {
+    document.getElementById('event-start').value = now.toISOString().slice(0,16);
+    document.getElementById('event-end').value   = new Date(now.getTime()+3600000).toISOString().slice(0,16);
+  }
   document.getElementById('event-modal').classList.add('open');
 }
 
