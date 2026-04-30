@@ -895,42 +895,85 @@ let cleanHtml = htmlData;
   State.reply.originalFrom = decodeEntities(headers['From'] || 'Unknown');
   State.reply.originalDate = headers['Date'] || '';
 
-  // Feature: Block external tracking images + Fix 17: console logging
+  // Smart external image handling: block only true tracking pixels, allow legitimate content
   const parser = new DOMParser();
   const doc = parser.parseFromString(htmlData, 'text/html');
-  let hasExternalImages = false;
-  const blockedImageLog = [];
+  let hasBlockedImages = false;
+  const blockedLog = [];
+  const allowedLog = [];
 
   doc.querySelectorAll('img').forEach(img => {
     const src = img.getAttribute('src');
-    if (src && /^https?:\/\//i.test(src)) {
-      hasExternalImages = true;
-      // Log the blocked image with context
-      const alt = img.getAttribute('alt') || '(no alt)';
-      const width = img.getAttribute('width') || 'unknown';
-      const height = img.getAttribute('height') || 'unknown';
-      let reason = 'External URL — blocked to prevent tracking pixel / privacy leak';
-      if (width === '1' || height === '1') reason = 'Tracking pixel (1x1) — blocked';
-      else if (width === '0' || height === '0') reason = 'Hidden tracking image (0px) — blocked';
-      blockedImageLog.push({ url: src, alt, size: `${width}x${height}`, reason });
+    if (!src || !/^https?:\/\//i.test(src)) return; // skip inline data: and cid: already resolved
+
+    const alt = img.getAttribute('alt') || '';
+    const widthAttr  = parseInt(img.getAttribute('width')  || img.style.width  || '0', 10);
+    const heightAttr = parseInt(img.getAttribute('height') || img.style.height || '0', 10);
+    const displayStyle = (img.getAttribute('style') || '').toLowerCase();
+    const sizeLabel = `${img.getAttribute('width') || '?'}x${img.getAttribute('height') || '?'}`;
+
+    // Classify as tracking pixel if ANY of these conditions are true:
+    const isTiny       = (widthAttr > 0 && widthAttr <= 3) || (heightAttr > 0 && heightAttr <= 3);
+    const isZero       = widthAttr === 0 || heightAttr === 0;
+    const isHidden     = /display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0/.test(displayStyle);
+    const isNoAltTiny  = alt === '' && (widthAttr <= 3 || heightAttr <= 3);
+    // URLs that are clearly analytics/tracking endpoints (not CDN static assets)
+    const trackingUrlPatterns = /\/(pixel|track|open|beacon|wf\/open|trk|t\.gif|spacer\.gif|blank\.gif|1x1|count|analytics|stat)([\/?]|$)/i;
+    const isTrackingUrl = trackingUrlPatterns.test(src);
+
+    const isTracker = isTiny || isZero || isHidden || isNoAltTiny || isTrackingUrl;
+
+    if (isTracker) {
+      // Block: replace with invisible placeholder, preserve data-blocked-src for "show images"
+      hasBlockedImages = true;
+      let reason = 'Suspected tracking pixel';
+      if (isTiny || isZero)  reason = `Tracking pixel — tiny size (${sizeLabel})`;
+      if (isHidden)          reason = 'Hidden image (display:none / visibility:hidden)';
+      if (isTrackingUrl)     reason = 'Tracking endpoint URL pattern matched';
+      blockedLog.push({ url: src, alt: alt || '(no alt)', size: sizeLabel, reason });
 
       img.setAttribute('data-blocked-src', src);
       img.removeAttribute('src');
-      img.setAttribute('src', 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100" style="background:%23f0f0f0"%3E%3C/svg%3E');
-      img.style.border = '1px dashed var(--border)';
+      img.setAttribute('src', 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns="http://www.w3.org/2000/svg" width="1" height="1"%3E%3C/svg%3E');
+      img.style.display = 'none'; // fully invisible, not a grey box
+    } else {
+      // Allow: legitimate content image (logo, icon, profile photo, banner)
+      allowedLog.push({ url: src, alt: alt || '(no alt)', size: sizeLabel });
+      // Leave src intact — image loads normally inside the iframe sandbox
     }
   });
 
-  if (blockedImageLog.length > 0) {
-    console.group(`🛡️ Aether — ${blockedImageLog.length} external image(s) blocked in: "${decodeEntities(headers['Subject']) || '(no subject)'}"`);
-    blockedImageLog.forEach((entry, i) => {
-      console.group(`Image #${i + 1}`);
-      console.log('URL:   ', entry.url);
-      console.log('Alt:   ', entry.alt);
-      console.log('Size:  ', entry.size);
-      console.warn('Reason:', entry.reason);
+  // Console report — always show, grouped by category
+  const totalExternal = blockedLog.length + allowedLog.length;
+  if (totalExternal > 0) {
+    const subject = decodeEntities(headers['Subject']) || '(no subject)';
+    console.group(`🛡️ Aether — ${totalExternal} external image(s) in: "${subject}"`);
+
+    if (blockedLog.length > 0) {
+      console.group(`🚫 Blocked as trackers (${blockedLog.length})`);
+      blockedLog.forEach((e, i) => {
+        console.group(`Tracker #${i + 1}`);
+        console.log('URL:   ', e.url);
+        console.log('Alt:   ', e.alt);
+        console.log('Size:  ', e.size);
+        console.warn('Reason:', e.reason);
+        console.groupEnd();
+      });
       console.groupEnd();
-    });
+    }
+
+    if (allowedLog.length > 0) {
+      console.group(`✅ Allowed as content images (${allowedLog.length})`);
+      allowedLog.forEach((e, i) => {
+        console.group(`Content #${i + 1}`);
+        console.log('URL:   ', e.url);
+        console.log('Alt:   ', e.alt);
+        console.log('Size:  ', e.size);
+        console.groupEnd();
+      });
+      console.groupEnd();
+    }
+
     console.groupEnd();
   }
 
@@ -943,13 +986,12 @@ let cleanHtml = htmlData;
      }
   }
 
-  // Build the original (images-blocked) and unblocked HTML upfront
+  // Build the unblocked version (restores only the tracker placeholders, not content images)
   const unblockedHtml = safeHtml
-    .replace(/ src="data:image\/svg\+xml;charset=UTF-8[^"]*"/g, '')
-    .replace(/ data-blocked-src="/g, ' src="')
-    .replace(/ style="border: 1px dashed var\(--border\);"/g, '');
+    .replace(/src="data:image\/svg\+xml;charset=UTF-8[^"]*"\s*/g, '')
+    .replace(/data-blocked-src="/g, 'src="')
+    .replace(/style="display: none;"/g, '');
 
-  // Use a helper to load HTML into iframe via Blob URL (avoids srcdoc null-origin issues)
   function loadIframeHtml(iframe, html) {
     const prev = iframe._blobUrl;
     const blob = new Blob([html], { type: 'text/html' });
@@ -961,7 +1003,6 @@ let cleanHtml = htmlData;
 
   const bodyContainer = el('div', 'email-body');
   if (bodyObj.type === 'text/html') {
-    // No sandbox: external images need network access; links open via base target=_blank
     const iframe = el('iframe', '', '', {
       style: 'width:100%; min-height:300px; height:600px; border:1px solid var(--border); background:#fff; border-radius:8px; flex-shrink:0;'
     });
@@ -973,19 +1014,18 @@ let cleanHtml = htmlData;
   }
   scrollWrapper.appendChild(bodyContainer);
 
-  if (hasExternalImages) {
+  if (hasBlockedImages) {
     const banner = el('div', 'image-block-banner', '', {
       style: 'background: var(--surface2); padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; color: var(--text2); margin-bottom: 16px; border-radius: 8px;'
     });
-    const msgText = el('span', '', '\uD83D\uDDBC\uFE0F Images are hidden to protect your privacy.');
-    const btnShow = el('button', 'action-btn', 'Display Images', { style: 'font-weight: 500;' });
+    const msgText = el('span', '', `🛡️ ${blockedLog.length} tracking pixel(s) hidden.`);
+    const btnShow = el('button', 'action-btn', 'Show anyway', { style: 'font-weight: 500;' });
     btnShow.onclick = () => {
       const iframe = bodyContainer.querySelector('iframe');
       if (iframe) loadIframeHtml(iframe, unblockedHtml);
       banner.style.display = 'none';
     };
     banner.append(msgText, btnShow);
-    // banner will be inserted after headerSec once it's in the DOM (see viewer.append below)
     headerSec._pendingBanner = banner;
   }
 
