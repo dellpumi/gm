@@ -435,10 +435,21 @@ function setupEventListeners() {
   document.getElementById('btn-close-event').addEventListener('click', () => document.getElementById('event-modal').classList.remove('open'));
   document.getElementById('btn-cancel-event').addEventListener('click', () => document.getElementById('event-modal').classList.remove('open'));
   document.getElementById('btn-save-event').addEventListener('click', saveEvent);
+  // Fix 27: Delete event
+  document.getElementById('btn-delete-event').addEventListener('click', deleteEvent);
+  // Fix 28: All-day toggle
+  document.getElementById('event-allday').addEventListener('change', (e) => updateAllDayFields(e.target.checked));
 
   document.getElementById('btn-close-contact').addEventListener('click', () => document.getElementById('contact-modal').classList.remove('open'));
   document.getElementById('btn-cancel-contact').addEventListener('click', () => document.getElementById('contact-modal').classList.remove('open'));
   document.getElementById('btn-save-contact').addEventListener('click', saveContact);
+  // Fix 30: Delete contact from modal
+  document.getElementById('btn-delete-contact-modal').addEventListener('click', () => {
+    // Find the current contact being edited by resourceName
+    const rn = document.getElementById('contact-rn').value;
+    const c = State.contacts.items.find(c => c.resourceName === rn);
+    if (c) deleteContact(c);
+  });
 
   document.querySelectorAll('.autocomplete-input').forEach(input => attachAutocomplete(input));
 }
@@ -759,7 +770,20 @@ function getEmailHtml(payload) {
     return m ? m[1].toLowerCase() : null;
   }
 
-  // Decode base64 body data respecting the part's charset
+  // Extract charset from <meta> tags in raw HTML bytes (scanned as latin-1 since ASCII range is same)
+  function extractMetaCharset(bytes) {
+    // Read enough of the bytes as latin-1 to find the <head> section
+    const head = new TextDecoder('latin-1').decode(bytes.slice(0, 4096));
+    // <meta charset="iso-8859-2">
+    let m = head.match(/<meta[^>]+charset=["']?([^"';\s>]+)/i);
+    if (m) return m[1].toLowerCase();
+    // <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-2">
+    m = head.match(/charset=["']?([^"';\s>]+)/i);
+    if (m) return m[1].toLowerCase();
+    return null;
+  }
+
+  // Decode base64url body data respecting the part's charset
   function decodePartBody(data, charset) {
     if (!data) return '';
     const b64 = (data || '').replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
@@ -769,12 +793,26 @@ function getEmailHtml(payload) {
       const bin = atob(padded);
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      // Use the declared charset; fall back to utf-8
-      const enc = charset && charset !== 'utf-8' && charset !== 'utf8' ? charset : 'utf-8';
+
+      // If no charset from headers, try to find it in the meta tags
+      if (!charset) charset = extractMetaCharset(bytes);
+
+      const isUtf8 = !charset || charset === 'utf-8' || charset === 'utf8';
+      if (isUtf8) {
+        return new TextDecoder('utf-8').decode(bytes);
+      }
+
+      // Try the declared charset first (e.g. iso-8859-2, windows-1250, etc.)
       try {
-        return new TextDecoder(enc, { fatal: true }).decode(bytes);
+        return new TextDecoder(charset, { fatal: true }).decode(bytes);
       } catch(e) {
-        // If declared charset fails, fall back to utf-8 lenient
+        // If the declared charset name isn't recognised by the browser, try common aliases
+        const aliases = { 'iso-8859-2': 'iso-8859-2', 'windows-1250': 'windows-1250', 'cp1250': 'windows-1250', 'latin2': 'iso-8859-2', 'windows-1252': 'windows-1252', 'cp1252': 'windows-1252', 'latin1': 'iso-8859-1', 'iso-8859-1': 'iso-8859-1' };
+        const alias = aliases[charset];
+        if (alias && alias !== charset) {
+          try { return new TextDecoder(alias, { fatal: true }).decode(bytes); } catch(e2) {}
+        }
+        // Last resort: utf-8 with replacement characters
         return new TextDecoder('utf-8').decode(bytes);
       }
     } catch(e) {
@@ -986,8 +1024,10 @@ let cleanHtml = htmlData;
     const isHidden     = /display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0/.test(displayStyle);
     const isNoAltTiny  = alt === '' && (widthAttr <= 3 || heightAttr <= 3);
     // URLs that are clearly analytics/tracking endpoints (not CDN static assets)
-    const trackingUrlPatterns = /\/(pixel|track|open|beacon|wf\/open|trk|t\.gif|spacer\.gif|blank\.gif|1x1|count|analytics|stat)([\/?]|$)/i;
-    const isTrackingUrl = trackingUrlPatterns.test(src);
+    // Be careful not to block legitimate CDN images that have tracking query params (?u=...)
+    // We only block if the PATH SEGMENT itself is a known tracker endpoint
+    const trackingUrlPatterns = /\/(pixel|track|open|beacon|wf\/open|trk|t\.gif|spacer\.gif|blank\.gif|1x1|count\.gif)([\/?]|$)/i;
+    const isTrackingUrl = trackingUrlPatterns.test(src.split('?')[0]); // check path only, not query string
 
     const isTracker = isTiny || isZero || isHidden || isNoAltTiny || isTrackingUrl;
 
@@ -1054,15 +1094,17 @@ let cleanHtml = htmlData;
      }
   }
 
-  // Build the unblocked version (restores only the tracker placeholders, not content images)
+  // Build the unblocked version: restore data-blocked-src back to src, remove hidden styles
   const unblockedHtml = safeHtml
-    .replace(/src="data:image\/svg\+xml;charset=UTF-8[^"]*"\s*/g, '')
+    .replace(/\s*src="data:image\/svg\+xml[^"]*"/g, '')
     .replace(/data-blocked-src="/g, 'src="')
-    .replace(/style="display: none;"/g, '');
+    .replace(/style="display: none;"\s*/g, '');
 
   function loadIframeHtml(iframe, html) {
     const prev = iframe._blobUrl;
-    const blob = new Blob([html], { type: 'text/html' });
+    // Include a permissive meta so the iframe can load external images
+    const fullHtml = html.includes('<!DOCTYPE') ? html : '<!DOCTYPE html>' + html;
+    const blob = new Blob([fullHtml], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
     iframe._blobUrl = url;
     iframe.src = url;
@@ -1086,12 +1128,14 @@ let cleanHtml = htmlData;
     const banner = el('div', 'image-block-banner', '', {
       style: 'background: var(--surface2); padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; color: var(--text2); margin-bottom: 16px; border-radius: 8px;'
     });
-    const msgText = el('span', '', `🛡️ ${blockedLog.length} tracking pixel(s) hidden.`);
-    const btnShow = el('button', 'action-btn', 'Show anyway', { style: 'font-weight: 500;' });
+    const trackerCount = blockedLog.length;
+    const contentCount = allowedLog.length;
+    const msgText = el('span', '', `🛡️ ${trackerCount} tracking pixel${trackerCount!==1?'s':''} hidden.${contentCount > 0 ? ` ${contentCount} content image${contentCount!==1?'s':''} loading normally.` : ''}`);
+    const btnShow = el('button', 'action-btn', 'Load all images', { style: 'font-weight: 500;' });
     btnShow.onclick = () => {
       const iframe = bodyContainer.querySelector('iframe');
       if (iframe) loadIframeHtml(iframe, unblockedHtml);
-      banner.style.display = 'none';
+      banner.remove();
     };
     banner.append(msgText, btnShow);
     headerSec._pendingBanner = banner;
@@ -1606,35 +1650,58 @@ function renderCalendarGrid(eventsToRender = null) {
 function openEventModal(event) {
   State.calendar.editingEventId = event?.id || null;
   State.calendar.editingCalendarId = event?.calendarId || null;
-  
+  State.calendar.editingEvent = event || null;
+
   document.getElementById('event-modal-title').textContent = event ? 'Edit Event' : 'New Event';
   document.getElementById('event-title').value = event?.summary || '';
   document.getElementById('event-location').value = event?.location || '';
   document.getElementById('event-desc').value = event?.description || '';
-  
+
+  // Fix 27: Show/hide delete button
+  const btnDel = document.getElementById('btn-delete-event');
+  btnDel.style.display = event ? 'inline-flex' : 'none';
+
   const calSelect = document.getElementById('event-calendar');
-  // For new events: enable selection; for edits: lock to current calendar
   calSelect.disabled = !!event;
   if (event?.calendarId) {
     calSelect.value = event.calendarId;
   } else if (calSelect.options.length > 0) {
     calSelect.selectedIndex = 0;
   }
-  
+
+  // Fix 28: All-day toggle
+  const isAllDay = event ? (!event.start?.dateTime && !!event.start?.date) : false;
+  document.getElementById('event-allday').checked = isAllDay;
+  updateAllDayFields(isAllDay);
+
+  // Fix 28: Recurrence
+  const rrule = event?.recurrence?.[0] || '';
+  const recSelect = document.getElementById('event-recurrence');
+  // Try to match existing rrule to one of our options
+  let matched = '';
+  for (const opt of recSelect.options) {
+    if (opt.value && rrule.startsWith(opt.value)) { matched = opt.value; break; }
+  }
+  recSelect.value = matched;
+  // Disable recurrence change when editing existing recurring event (use scope instead)
+  recSelect.disabled = !!(event && rrule);
+
+  // Fix 28: Recurrence scope (only for existing recurring events)
+  const scopeGroup = document.getElementById('event-recurrence-scope-group');
+  scopeGroup.style.display = (event && rrule) ? 'flex' : 'none';
+  document.getElementById('event-recurrence-scope').value = 'single';
+
   const now = new Date();
   if (event) {
-    // Support both timed (dateTime) and all-day (date) events
     const startRaw = event.start?.dateTime || (event.start?.date ? event.start.date + 'T00:00:00' : null);
-    const endRaw   = event.end?.dateTime   || (event.end?.date   ? event.end.date   + 'T00:00:00' : null);
-    // For all-day events Google end is exclusive — show the real last day to user
-    let endVal = endRaw;
+    let endRaw = event.end?.dateTime || (event.end?.date ? event.end.date + 'T00:00:00' : null);
     if (!event.start?.dateTime && event.end?.date) {
       const d = new Date(event.end.date + 'T00:00:00');
       d.setDate(d.getDate() - 1);
-      endVal = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + 'T00:00:00';
+      endRaw = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + 'T00:00:00';
     }
     document.getElementById('event-start').value = startRaw?.slice(0,16) || now.toISOString().slice(0,16);
-    document.getElementById('event-end').value   = endVal?.slice(0,16)   || new Date(now.getTime()+3600000).toISOString().slice(0,16);
+    document.getElementById('event-end').value   = endRaw?.slice(0,16)   || new Date(now.getTime()+3600000).toISOString().slice(0,16);
   } else {
     document.getElementById('event-start').value = now.toISOString().slice(0,16);
     document.getElementById('event-end').value   = new Date(now.getTime()+3600000).toISOString().slice(0,16);
@@ -1642,30 +1709,129 @@ function openEventModal(event) {
   document.getElementById('event-modal').classList.add('open');
 }
 
+function updateAllDayFields(isAllDay) {
+  const startEl = document.getElementById('event-start');
+  const endEl   = document.getElementById('event-end');
+  if (isAllDay) {
+    // Switch to date-only inputs
+    startEl.type = 'date';
+    endEl.type   = 'date';
+    if (startEl.value.includes('T')) startEl.value = startEl.value.slice(0, 10);
+    if (endEl.value.includes('T'))   endEl.value   = endEl.value.slice(0, 10);
+  } else {
+    startEl.type = 'datetime-local';
+    endEl.type   = 'datetime-local';
+    if (!startEl.value.includes('T')) startEl.value = startEl.value + 'T09:00';
+    if (!endEl.value.includes('T'))   endEl.value   = endEl.value   + 'T10:00';
+  }
+}
+
 async function saveEvent() {
   const summary = document.getElementById('event-title').value.trim();
   if (!summary) return toast('Please enter a title', 'error');
-  const start = document.getElementById('event-start').value;
-  const end = document.getElementById('event-end').value;
-  
-  const body = { 
-    summary, 
-    start: { dateTime: new Date(start).toISOString() }, 
-    end: { dateTime: new Date(end).toISOString() }, 
-    location: document.getElementById('event-location').value.trim() || undefined, 
-    description: document.getElementById('event-desc').value.trim() || undefined 
+
+  const isAllDay = document.getElementById('event-allday').checked;
+  const startVal = document.getElementById('event-start').value;
+  const endVal   = document.getElementById('event-end').value;
+  if (!startVal || !endVal) return toast('Please set start and end', 'error');
+
+  let startObj, endObj;
+  if (isAllDay) {
+    const startDate = startVal.slice(0, 10);
+    const endDate   = endVal.slice(0, 10);
+    // Google Calendar all-day end is exclusive (add 1 day)
+    const endExcl = new Date(endDate + 'T00:00:00');
+    endExcl.setDate(endExcl.getDate() + 1);
+    const endExclStr = endExcl.toISOString().slice(0, 10);
+    startObj = { date: startDate };
+    endObj   = { date: endExclStr };
+  } else {
+    startObj = { dateTime: new Date(startVal).toISOString() };
+    endObj   = { dateTime: new Date(endVal).toISOString() };
+  }
+
+  const rruleVal = document.getElementById('event-recurrence').value;
+  const body = {
+    summary,
+    start: startObj,
+    end: endObj,
+    location:    document.getElementById('event-location').value.trim() || undefined,
+    description: document.getElementById('event-desc').value.trim()     || undefined,
   };
+  if (rruleVal) body.recurrence = [rruleVal];
 
   const calId = State.calendar.editingEventId ? State.calendar.editingCalendarId : document.getElementById('event-calendar').value;
 
   try {
-    if (State.calendar.editingEventId) await gapi('PUT', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${State.calendar.editingEventId}`, body);
-    else await gapi('POST', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events`, body);
-    
+    if (State.calendar.editingEventId) {
+      const scope = document.getElementById('event-recurrence-scope').value;
+      const event = State.calendar.editingEvent;
+      const isRecurring = !!(event?.recurrence?.[0] || event?.recurringEventId);
+
+      if (isRecurring && scope !== 'all') {
+        // Edit this occurrence (or this + following) via instance endpoint
+        const instanceId = event.recurringEventId ? event.id : State.calendar.editingEventId;
+        if (scope === 'single') {
+          // PATCH just this instance
+          await gapi('PATCH', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${instanceId}`, body);
+        } else {
+          // 'following' — set thisAndFollowing via originalStartTime
+          body.recurrenceId = event.originalStartTime?.dateTime || event.originalStartTime?.date;
+          await gapi('PATCH', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${instanceId}?modificationMode=FOLLOWING`, body);
+        }
+      } else {
+        await gapi('PUT', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${State.calendar.editingEventId}`, body);
+      }
+    } else {
+      await gapi('POST', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events`, body);
+    }
     document.getElementById('event-modal').classList.remove('open');
     toast('Event saved!', 'success');
     loadCalendar();
-  } catch(e) { toast('Error saving event', 'error'); }
+  } catch(e) { toast('Error saving event: ' + e.message, 'error'); }
+}
+
+async function deleteEvent() {
+  const eventId = State.calendar.editingEventId;
+  const calId   = State.calendar.editingCalendarId;
+  const event   = State.calendar.editingEvent;
+  if (!eventId || !calId) return;
+
+  const isRecurring = !!(event?.recurrence?.[0] || event?.recurringEventId);
+  const scope = isRecurring ? document.getElementById('event-recurrence-scope').value : 'all';
+
+  const scopeLabels = { single: 'this event only', following: 'this and following events', all: 'all events in the series' };
+  const label = isRecurring ? scopeLabels[scope] : 'this event';
+
+  confirmAction('Delete Event', `Delete ${label}?`, '🗑 Delete', async () => {
+    try {
+      if (isRecurring && scope === 'single') {
+        // Cancel just this instance by setting status to cancelled
+        await gapi('PATCH', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${eventId}`, { status: 'cancelled' });
+      } else if (isRecurring && scope === 'following') {
+        // Delete this and following by truncating the series
+        // Set UNTIL on the master event to the day before this occurrence
+        const masterEvent = await gapi('GET', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${event.recurringEventId || eventId}`);
+        const occStart = event.originalStartTime?.dateTime || event.originalStartTime?.date || event.start?.dateTime || event.start?.date;
+        const untilDate = new Date(occStart);
+        untilDate.setDate(untilDate.getDate() - 1);
+        const untilStr = untilDate.toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+        const rrules = (masterEvent.recurrence || []).map(r => {
+          if (r.startsWith('RRULE:') && !r.includes('UNTIL=') && !r.includes('COUNT=')) {
+            return r + ';UNTIL=' + untilStr;
+          }
+          return r;
+        });
+        await gapi('PATCH', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${masterEvent.id}`, { recurrence: rrules });
+      } else {
+        // Delete the whole event / series
+        await gapi('DELETE', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${eventId}`);
+      }
+      document.getElementById('event-modal').classList.remove('open');
+      toast('Event deleted', 'success');
+      loadCalendar();
+    } catch(e) { toast('Error deleting event: ' + e.message, 'error'); }
+  }, true);
 }
 
 // ===== CONTACTS =====
@@ -1682,7 +1848,7 @@ async function loadContacts(loadMore = false) {
   
   try {
     const pageParam = loadMore && State.contacts.pageToken ? `&pageToken=${State.contacts.pageToken}` : '';
-    const data = await gapi('GET', `https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations&pageSize=100${pageParam}`);
+    const data = await gapi('GET', `https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations,birthdays,biographies&pageSize=100${pageParam}`);
     
     State.contacts.pageToken = data.nextPageToken || null;
     if(!loadMore) State.contacts.items =[];
@@ -1728,100 +1894,180 @@ function renderContactsList(contacts, clearFirst) {
 
 function showContactDetail(c) {
   const panel = document.getElementById('contact-detail-panel');
-  panel.classList.add('open'); 
+  panel.classList.add('open');
   document.getElementById('contact-detail-empty').style.display = 'none';
 
   const viewer = document.getElementById('contact-viewer');
   viewer.style.display = 'block';
   viewer.innerHTML = '';
 
-  const name = c.names?.[0]?.displayName || 'Unknown';
+  const name  = c.names?.[0]?.displayName || 'Unknown';
   const email = c.emailAddresses?.[0]?.value || '';
   const phone = c.phoneNumbers?.[0]?.value || '';
-  const org = c.organizations?.[0]?.name || '';
+  const org   = c.organizations?.[0]?.name || '';
   const title = c.organizations?.[0]?.title || '';
+
+  // Birthday
+  const bday = c.birthdays?.[0]?.date;
+  let birthdayStr = '';
+  if (bday) {
+    const parts = [bday.year, String(bday.month).padStart(2,'0'), String(bday.day).padStart(2,'0')].filter(Boolean);
+    birthdayStr = parts.join('-');
+  }
+
+  // Notes / biographies
+  const notes = c.biographies?.[0]?.value || '';
 
   viewer.append(
     el('div', 'contact-big-avatar', name[0].toUpperCase()),
     el('div', 'contact-big-name', name),
-    el('div', 'contact-big-org',[title, org].filter(Boolean).join(' · '))
+    el('div', 'contact-big-org', [title, org].filter(Boolean).join(' · '))
   );
 
   const fields = el('div', 'contact-fields');
-  if (email) {
-    const eGroup = el('div', 'contact-field-group');
-    const a = el('a', '', email, { href: `mailto:${email}` });
-    const val = el('div', 'contact-field-val'); val.appendChild(a);
-    eGroup.append(el('div', 'contact-field-label', 'Email'), val);
-    fields.appendChild(eGroup);
-  }
-  if (phone) {
-    const pGroup = el('div', 'contact-field-group');
-    pGroup.append(el('div', 'contact-field-label', 'Phone'), el('div', 'contact-field-val', phone));
-    fields.appendChild(pGroup);
-  }
+  const addField = (label, value, isLink = false) => {
+    if (!value) return;
+    const g = el('div', 'contact-field-group');
+    g.appendChild(el('div', 'contact-field-label', label));
+    if (isLink) {
+      const val = el('div', 'contact-field-val');
+      val.appendChild(el('a', '', value, { href: isLink === 'mail' ? `mailto:${value}` : `tel:${value}` }));
+      g.appendChild(val);
+    } else {
+      g.appendChild(el('div', 'contact-field-val', value));
+    }
+    fields.appendChild(g);
+  };
+
+  addField('Email', email, 'mail');
+  addField('Phone', phone, 'tel');
+  addField('Company', org);
+  addField('Job Title', title);
+  addField('Birthday', birthdayStr);
+  addField('Notes', notes);
   viewer.appendChild(fields);
 
   const actions = el('div', 'contact-actions');
   if (email) {
-    const btnEmail = el('button', 'action-btn primary', '✉ Send Email');
-    btnEmail.onclick = () => openComposeModal(email);
-    actions.appendChild(btnEmail);
+    const btnMail = el('button', 'action-btn primary', '✉ Send Email');
+    btnMail.onclick = () => openComposeModal(email);
+    actions.appendChild(btnMail);
   }
-  const btnEdit = el('button', 'action-btn', '✏️ Edit Contact');
+  const btnEdit = el('button', 'action-btn', '✏️ Edit');
   btnEdit.onclick = () => openContactModal(c);
   actions.appendChild(btnEdit);
-  
+
+  // Fix 30: Delete contact button
+  const btnDel = el('button', 'action-btn', '🗑 Delete');
+  btnDel.style.color = 'var(--red, #e05b5b)';
+  btnDel.style.borderColor = 'var(--red, #e05b5b)';
+  btnDel.onclick = () => deleteContact(c);
+  actions.appendChild(btnDel);
+
   viewer.appendChild(actions);
 }
 
 function openContactModal(c) {
   document.getElementById('contact-rn').value = c.resourceName;
   document.getElementById('contact-etag').value = c.etag || '';
-  
-  const given = c.names?.[0]?.givenName || '';
+
+  const given  = c.names?.[0]?.givenName  || '';
   const family = c.names?.[0]?.familyName || '';
-  
   if (!given && !family) {
     const parts = (c.names?.[0]?.displayName || '').split(' ');
     document.getElementById('contact-edit-first-name').value = parts[0] || '';
-    document.getElementById('contact-edit-last-name').value = parts.slice(1).join(' ') || '';
+    document.getElementById('contact-edit-last-name').value  = parts.slice(1).join(' ') || '';
   } else {
     document.getElementById('contact-edit-first-name').value = given;
-    document.getElementById('contact-edit-last-name').value = family;
+    document.getElementById('contact-edit-last-name').value  = family;
   }
-  
-  document.getElementById('contact-edit-email').value = c.emailAddresses?.[0]?.value || '';
-  document.getElementById('contact-edit-phone').value = c.phoneNumbers?.[0]?.value || '';
+
+  document.getElementById('contact-edit-email').value   = c.emailAddresses?.[0]?.value || '';
+  document.getElementById('contact-edit-phone').value   = c.phoneNumbers?.[0]?.value   || '';
+  document.getElementById('contact-edit-company').value = c.organizations?.[0]?.name   || '';
+  document.getElementById('contact-edit-title').value   = c.organizations?.[0]?.title  || '';
+  document.getElementById('contact-edit-notes').value   = c.biographies?.[0]?.value    || '';
+
+  // Birthday: stored as {year, month, day}
+  const bday = c.birthdays?.[0]?.date;
+  if (bday) {
+    const y = bday.year  ? String(bday.year)  : '????';
+    const m = bday.month ? String(bday.month).padStart(2,'0') : '??';
+    const d = bday.day   ? String(bday.day).padStart(2,'0')   : '??';
+    document.getElementById('contact-edit-birthday').value = `${y}-${m}-${d}`;
+  } else {
+    document.getElementById('contact-edit-birthday').value = '';
+  }
+
   document.getElementById('contact-modal').classList.add('open');
 }
 
 async function saveContact() {
-  const rn = document.getElementById('contact-rn').value;
+  const rn    = document.getElementById('contact-rn').value;
   const first = document.getElementById('contact-edit-first-name').value.trim();
-  const last = document.getElementById('contact-edit-last-name').value.trim();
-  
-  const body = { 
-    etag: document.getElementById('contact-etag').value, 
-    names:[{ givenName: first || 'Unknown', familyName: last }] 
+  const last  = document.getElementById('contact-edit-last-name').value.trim();
+
+  const body = {
+    etag: document.getElementById('contact-etag').value,
+    names: [{ givenName: first || 'Unknown', familyName: last }]
   };
   const updateFields = ['names'];
-  
-  const email = document.getElementById('contact-edit-email').value.trim();
-  const phone = document.getElementById('contact-edit-phone').value.trim();
-  if (email) { body.emailAddresses =[{ value: email }]; updateFields.push('emailAddresses'); }
-  if (phone) { body.phoneNumbers =[{ value: phone }]; updateFields.push('phoneNumbers'); }
+
+  const email   = document.getElementById('contact-edit-email').value.trim();
+  const phone   = document.getElementById('contact-edit-phone').value.trim();
+  const company = document.getElementById('contact-edit-company').value.trim();
+  const title   = document.getElementById('contact-edit-title').value.trim();
+  const notes   = document.getElementById('contact-edit-notes').value.trim();
+  const bday    = document.getElementById('contact-edit-birthday').value.trim();
+
+  if (email)   { body.emailAddresses = [{ value: email }]; updateFields.push('emailAddresses'); }
+  if (phone)   { body.phoneNumbers   = [{ value: phone }]; updateFields.push('phoneNumbers'); }
+  if (company || title) {
+    body.organizations = [{ name: company, title }];
+    updateFields.push('organizations');
+  }
+  if (notes)   { body.biographies = [{ value: notes, contentType: 'TEXT_PLAIN' }]; updateFields.push('biographies'); }
+  if (bday) {
+    const parts = bday.split('-');
+    const bdayObj = {};
+    if (parts[0] && parts[0] !== '????') bdayObj.year  = parseInt(parts[0], 10);
+    if (parts[1] && parts[1] !== '??')   bdayObj.month = parseInt(parts[1], 10);
+    if (parts[2] && parts[2] !== '??')   bdayObj.day   = parseInt(parts[2], 10);
+    if (bdayObj.month && bdayObj.day) {
+      body.birthdays = [{ date: bdayObj }];
+      updateFields.push('birthdays');
+    }
+  }
 
   try {
     await gapi('PATCH', `https://people.googleapis.com/v1/${rn}:updateContact?updatePersonFields=${updateFields.join(',')}`, body);
     toast('Contact updated!', 'success');
     document.getElementById('contact-modal').classList.remove('open');
-    loadContacts(); 
-  } catch (err) { 
+    loadContacts();
+  } catch (err) {
     if (err.message.includes('403') || err.message.includes('permission')) {
       toast('Permission Error: Please log out and log back in to grant Edit Contact permissions.', 'error');
     } else {
-      toast('Error saving contact', 'error'); 
+      toast('Error saving contact: ' + err.message, 'error');
     }
   }
+}
+
+// Fix 30: Delete contact
+async function deleteContact(c) {
+  const name = c.names?.[0]?.displayName || 'this contact';
+  confirmAction('Delete Contact', `Permanently delete "${name}"? This cannot be undone.`, '🗑 Delete', async () => {
+    try {
+      await gapi('DELETE', `https://people.googleapis.com/v1/${c.resourceName}:deleteContact`);
+      toast('Contact deleted', 'success');
+      document.getElementById('contact-modal').classList.remove('open');
+      // Hide detail panel and reload list
+      document.getElementById('contact-viewer').style.display = 'none';
+      document.getElementById('contact-detail-empty').style.display = 'flex';
+      document.getElementById('contact-detail-panel').classList.remove('open');
+      loadContacts();
+    } catch (err) {
+      toast('Error deleting contact: ' + err.message, 'error');
+    }
+  }, true);
 }

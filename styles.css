@@ -116,6 +116,8 @@ button { outline: none; font-family: var(--font); }
 .modal-footer { padding: 16px 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
 .btn-cancel { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 16px; cursor: pointer; color: var(--text2); font-size: 13px; transition: all var(--transition); }
 .btn-save { background: var(--accent); color: #fff; border: none; padding: 8px 20px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; font-weight: 500; }
+.btn-delete-event { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: var(--radius-sm); font-size: 13px; border: 1px solid var(--red, #e05b5b); background: none; color: var(--red, #e05b5b); cursor: pointer; transition: all var(--transition); }
+.btn-delete-event:hover { background: var(--red, #e05b5b); color: #fff; }
 
 /* UTILS */
 .empty-state { display: flex; align-items: center; justify-content: center; flex: 1; flex-direction: column; gap: 10px; color: var(--text3); font-size: 13.5px; padding: 20px;}

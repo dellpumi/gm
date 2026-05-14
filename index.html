@@ -96,7 +96,7 @@
         <input type="text" id="search-input" placeholder="Search current view...">
       </div>
       <div class="topbar-actions">
-        <div id="session-timer"><span style="color:var(--text2); display:flex; align-items:center;">version 2.5 - 2026.04.30 &nbsp;|&nbsp;</span> ⏱ <span id="timer-text" style="margin-left:4px;">--:--</span></div>
+        <div id="session-timer"><span style="color:var(--text2); display:flex; align-items:center;">version 2.6 - 2026.05.14 &nbsp;|&nbsp;</span> ⏱ <span id="timer-text" style="margin-left:4px;">--:--</span></div>
         <button class="icon-btn" id="btn-refresh" title="Refresh">↻</button>
       </div>
     </div>
@@ -118,7 +118,7 @@
             <div class="reply-editor" id="reply-editor">
               <div class="compose-field"><label>To</label><input type="text" id="reply-to" class="autocomplete-input"></div>
               <div class="compose-field"><label>Subj</label><input type="text" id="reply-subject"></div>
-              <div id="reply-body" class="rich-editor" contenteditable="true" placeholder="Write your reply... (Drag & Drop images here)"></div>
+              <div id="reply-body" class="rich-editor" contenteditable="true" placeholder="Write your reply... (Drag &amp; Drop images here)"></div>
               <div class="attached-files" id="reply-attached-files-list"></div>
               <div class="reply-editor-footer">
                 <label class="attach-btn" for="reply-attach-input">📎 Attach</label>
@@ -172,7 +172,7 @@
     <div class="compose-field"><label>To</label><input type="text" id="compose-to" class="autocomplete-input" placeholder="Recipients"></div>
     <div class="compose-field"><label>Cc</label><input type="text" id="compose-cc" class="autocomplete-input"></div>
     <div class="compose-field"><label>Subj</label><input type="text" id="compose-subject" placeholder="Subject"></div>
-    <div class="compose-body"><div id="compose-body-text" class="rich-editor" contenteditable="true" placeholder="Write your message... (Drag & Drop images here)"></div></div>
+    <div class="compose-body"><div id="compose-body-text" class="rich-editor" contenteditable="true" placeholder="Write your message... (Drag &amp; Drop images here)"></div></div>
     <div class="attached-files" id="attached-files-list"></div>
     <div class="compose-footer">
       <label class="attach-btn" for="compose-attach-input">📎 Attach</label>
@@ -182,8 +182,9 @@
   </div>
 </div>
 
+<!-- Event modal: Fix 27/28 — delete button + recurrence fields -->
 <div id="event-modal" class="modal-overlay" style="z-index: 250;">
-  <div class="modal-window">
+  <div class="modal-window" style="max-width:520px;">
     <div class="modal-header"><span id="event-modal-title">New Event</span><button id="btn-close-event">✕</button></div>
     <div class="modal-body">
       <div class="form-group"><label>Title</label><input type="text" id="event-title"></div>
@@ -192,16 +193,47 @@
         <div class="form-group"><label>Start</label><input type="datetime-local" id="event-start"></div>
         <div class="form-group"><label>End</label><input type="datetime-local" id="event-end"></div>
       </div>
+      <!-- Fix 28: All-day toggle -->
+      <div class="form-group" style="flex-direction:row; align-items:center; gap:8px;">
+        <input type="checkbox" id="event-allday" style="width:auto; accent-color:var(--accent);">
+        <label for="event-allday" style="margin:0; cursor:pointer;">All-day event</label>
+      </div>
+      <!-- Fix 28: Recurrence -->
+      <div class="form-group">
+        <label>Repeat</label>
+        <select id="event-recurrence">
+          <option value="">Does not repeat</option>
+          <option value="RRULE:FREQ=DAILY">Every day</option>
+          <option value="RRULE:FREQ=WEEKLY">Every week</option>
+          <option value="RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR">Every weekday (Mon–Fri)</option>
+          <option value="RRULE:FREQ=MONTHLY">Every month</option>
+          <option value="RRULE:FREQ=YEARLY">Every year</option>
+        </select>
+      </div>
+      <!-- Fix 28: Recurrence scope — shown only when editing a recurring event -->
+      <div class="form-group" id="event-recurrence-scope-group" style="display:none;">
+        <label>Edit scope</label>
+        <select id="event-recurrence-scope">
+          <option value="single">This event only</option>
+          <option value="following">This and following events</option>
+          <option value="all">All events in the series</option>
+        </select>
+      </div>
       <div class="form-group"><label>Location</label><input type="text" id="event-location"></div>
       <div class="form-group"><label>Description</label><textarea id="event-desc" rows="3"></textarea></div>
     </div>
-    <div class="modal-footer">
-      <button class="btn-cancel" id="btn-cancel-event">Cancel</button>
-      <button class="btn-save" id="btn-save-event">Save Event</button>
+    <div class="modal-footer" style="justify-content:space-between;">
+      <!-- Fix 27: Delete button on left, save/cancel on right -->
+      <button class="btn-delete-event" id="btn-delete-event" style="display:none;">🗑 Delete event</button>
+      <div style="display:flex; gap:8px;">
+        <button class="btn-cancel" id="btn-cancel-event">Cancel</button>
+        <button class="btn-save" id="btn-save-event">Save Event</button>
+      </div>
     </div>
   </div>
 </div>
 
+<!-- Contact modal: Fix 29 — more fields including birthday -->
 <div id="contact-modal" class="modal-overlay" style="z-index: 300;">
   <div class="modal-window">
     <div class="modal-header"><span>Edit Contact</span><button id="btn-close-contact">✕</button></div>
@@ -213,10 +245,17 @@
       </div>
       <div class="form-group"><label>Email</label><input type="email" id="contact-edit-email"></div>
       <div class="form-group"><label>Phone</label><input type="text" id="contact-edit-phone"></div>
+      <div class="form-group"><label>Company</label><input type="text" id="contact-edit-company"></div>
+      <div class="form-group"><label>Job Title</label><input type="text" id="contact-edit-title"></div>
+      <div class="form-group"><label>Birthday (YYYY-MM-DD)</label><input type="text" id="contact-edit-birthday" placeholder="e.g. 1990-06-15"></div>
+      <div class="form-group"><label>Notes</label><textarea id="contact-edit-notes" rows="2"></textarea></div>
     </div>
-    <div class="modal-footer">
-      <button class="btn-cancel" id="btn-cancel-contact">Cancel</button>
-      <button class="btn-save" id="btn-save-contact">Save Contact</button>
+    <div class="modal-footer" style="justify-content:space-between;">
+      <button class="btn-delete-event" id="btn-delete-contact-modal" style="color:var(--red,#e05b5b); border-color:var(--red,#e05b5b);">🗑 Delete</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn-cancel" id="btn-cancel-contact">Cancel</button>
+        <button class="btn-save" id="btn-save-contact">Save Contact</button>
+      </div>
     </div>
   </div>
 </div>
