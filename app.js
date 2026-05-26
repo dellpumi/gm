@@ -257,73 +257,68 @@ function encodeAddressList(str) {
 document.addEventListener('DOMContentLoaded', async () => {
   setupEventListeners();
 
-  // Fix 20: Proper tab-close detection using localStorage timestamp.
-  // sessionStorage is PRESERVED on Ctrl+Shift+T tab restore, so the heartbeat trick doesn't work.
-  // Instead: on every page load we check a localStorage timestamp written on pagehide.
-  // If that timestamp exists and is recent (< 10 seconds ago), it means the tab was
-  // closed and immediately restored — wipe the token.
-  // Normal page reloads (F5) also fire pagehide+load but we want those to keep the session,
-  // so we use a sessionStorage flag to distinguish: a true reload sets the flag before unload.
-  const CLOSE_TS_KEY   = 'aether_close_ts';
-  const RELOAD_FLAG    = 'aether_is_reload';
-
+  // Session close/restore detection
+  const CLOSE_TS_KEY = 'aether_close_ts';
+  const RELOAD_FLAG  = 'aether_is_reload';
   const closeTs  = parseInt(localStorage.getItem(CLOSE_TS_KEY) || '0', 10);
   const isReload = sessionStorage.getItem(RELOAD_FLAG) === '1';
-
-  if (closeTs && !isReload) {
-    // Tab was previously closed (not reloaded) — wipe any lingering token
-    Auth.clear();
-    State.token = null;
-  }
-  // Always clear the reload flag and the close timestamp on fresh load
+  if (closeTs && !isReload) { Auth.clear(); State.token = null; }
   sessionStorage.removeItem(RELOAD_FLAG);
   localStorage.removeItem(CLOSE_TS_KEY);
 
-  function markReload() {
-    // Called only on intentional reload (F5 / Ctrl+R) via keydown — NOT on tab close
-    sessionStorage.setItem(RELOAD_FLAG, '1');
-  }
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'F5' || (e.ctrlKey && e.key === 'r') || (e.metaKey && e.key === 'r')) {
-      markReload();
-    }
+    if (e.key === 'F5' || (e.ctrlKey && e.key === 'r') || (e.metaKey && e.key === 'r'))
+      sessionStorage.setItem(RELOAD_FLAG, '1');
+  });
+  window.addEventListener('pagehide', () => {
+    localStorage.setItem(CLOSE_TS_KEY, String(Date.now()));
+    Auth.clear(); State.token = null;
+  });
+  window.addEventListener('beforeunload', () => {
+    localStorage.setItem(CLOSE_TS_KEY, String(Date.now()));
+    Auth.clear(); State.token = null;
   });
 
-  function clearSessionOnClose() {
-    // Write a close timestamp to localStorage — survives tab close
-    localStorage.setItem(CLOSE_TS_KEY, String(Date.now()));
-    Auth.clear();
-    State.token = null;
-  }
-  window.addEventListener('pagehide', clearSessionOnClose);
-  window.addEventListener('beforeunload', clearSessionOnClose);
-
   window.addEventListener('offline', () => toast('You are offline. Reconnect to sync.', 'error'));
-  window.addEventListener('online', () => toast('Back online!', 'success'));
+  window.addEventListener('online',  () => toast('Back online!', 'success'));
 
-  if (Auth.parseHash() || Auth.check()) {
+  // PKCE: handle redirect back from Google with ?code=
+  const hasCode = new URLSearchParams(window.location.search).has('code');
+  let authed = false;
+  if (hasCode) {
+    authed = await Auth.parseCode();
+  } else if (Auth.check()) {
+    authed = true;
+  } else {
+    authed = await Auth.refresh();
+  }
+
+  if (authed) {
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
     startSessionTimer();
     try {
       await loadUserInfo();
       await loadEmails('INBOX');
-      loadAllContactsForAutocomplete(); 
+      loadAllContactsForAutocomplete();
     } catch (err) {
       toast(err.message, 'error');
       if (err.message === 'Session expired') handleSignOut();
     }
+  } else {
+    document.getElementById('login-screen').style.display = 'flex';
+    document.getElementById('app').style.display = 'none';
   }
 });
 
 // ===== EVENT BINDING =====
 function setupEventListeners() {
-  document.getElementById('btn-login').addEventListener('click', () => { if (!Auth.startLogin()) document.getElementById('setup-screen').classList.add('open'); });
+  document.getElementById('btn-login').addEventListener('click', async () => { if (!await Auth.startLogin()) document.getElementById('setup-screen').classList.add('open'); });
   document.getElementById('link-setup').addEventListener('click', (e) => { e.preventDefault(); document.getElementById('setup-screen').classList.add('open'); });
   document.getElementById('btn-close-setup').addEventListener('click', () => document.getElementById('setup-screen').classList.remove('open'));
   document.getElementById('btn-copy-origin').addEventListener('click', async () => { await navigator.clipboard.writeText(window.location.origin); toast('Copied!', 'success'); });
   document.getElementById('btn-goto-step2').addEventListener('click', () => { document.getElementById('setup-step-1').style.display='none'; document.getElementById('setup-step-2').style.display='block'; });
-  document.getElementById('btn-save-client-id').addEventListener('click', () => { Auth.setClientId(document.getElementById('client-id-input').value.trim()); Auth.startLogin(); });
+  document.getElementById('btn-save-client-id').addEventListener('click', async () => { Auth.setClientId(document.getElementById('client-id-input').value.trim()); await Auth.startLogin(); });
   
   document.getElementById('btn-sign-out').addEventListener('click', () => confirmAction('Sign Out', 'Are you sure you want to log out? This will clear your local app cache and sever connection.', 'Yes, Sign Out', handleSignOut, true));
 
@@ -563,13 +558,19 @@ function attachAutocomplete(input) {
 
 function startSessionTimer() {
   clearInterval(State.timerInterval);
-  State.timerInterval = setInterval(() => {
+  State.timerInterval = setInterval(async () => {
     const remain = Math.floor((Auth.getTokenExp() - Date.now()) / 1000);
     const textEl = document.getElementById('timer-text');
-    if (remain <= 0) { textEl.textContent = "00:00"; handleSignOut(); }
-    else {
+    if (remain <= 0) {
+      // Try silent refresh before signing out
+      const ok = await Auth.refresh();
+      if (!ok) { textEl.textContent = "00:00"; handleSignOut(); }
+      else textEl.style.color = '';
+    } else {
       textEl.textContent = `${Math.floor(remain / 60).toString().padStart(2,'0')}:${(remain % 60).toString().padStart(2,'0')}`;
       textEl.style.color = remain < 300 ? 'var(--red)' : '';
+      // Pre-emptive refresh at 5 minutes remaining
+      if (remain === 290) Auth.refresh().catch(() => {});
     }
   }, 1000);
 }
@@ -583,16 +584,12 @@ async function handleSignOut() {
       });
     } catch (e) { console.warn("Revocation failed", e); }
   }
-
-  localStorage.clear();
-  sessionStorage.clear();
-  Auth.clear();
+  Auth.clearAll();
   State.token = null;
   clearInterval(State.timerInterval);
-  
   document.getElementById('app').style.display = 'none';
   document.getElementById('login-screen').style.display = 'flex';
-  toast('Signed out and completely revoked access token', 'info');
+  toast('Signed out successfully', 'info');
 }
 
 async function loadUserInfo() {
@@ -636,10 +633,13 @@ async function loadEmails(label, loadMore = false) {
   btnMore.style.display = 'none';
 
   if (!loadMore) {
-    State.mail.items =[];
+    State.mail.items = [];
     State.mail.pageToken = null;
     loadingState(container);
     hideEmailDetail();
+    // Reset the label heading
+    const labelNames = { INBOX: 'Inbox', SENT: 'Sent', STARRED: 'Starred', DRAFT: 'Drafts', SPAM: 'Spam', TRASH: 'Trash', CATEGORY_PROMOTIONS: 'Promotions', CATEGORY_SOCIAL: 'Social', CATEGORY_UPDATES: 'Updates', CATEGORY_FORUMS: 'Forums' };
+    document.getElementById('list-label').textContent = labelNames[label] || label;
   }
 
   const q = encodeURIComponent(label === 'STARRED' ? 'is:starred' : '');
@@ -670,15 +670,31 @@ async function loadEmails(label, loadMore = false) {
 }
 
 async function searchEmails(query) {
-  if (!query.trim()) return renderEmailList(State.mail.items, true);
-  const container = document.getElementById('email-list');
-  loadingState(container);
-  try {
-    const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=${encodeURIComponent(query)}`);
-    if (!data.messages) return emptyState(container, 'No results');
-    const msgs = await Promise.all(data.messages.map(m => gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`)));
-    renderEmailList(msgs, true);
-  } catch (e) { toast('Search failed', 'error'); }
+  if (!query.trim()) {
+    // Restore full list view
+    renderEmailList(State.mail.items, true);
+    document.getElementById('btn-load-more-mail').style.display = State.mail.pageToken ? 'block' : 'none';
+    document.getElementById('list-label').textContent = State.mail.label.replace('CATEGORY_', '').charAt(0) + State.mail.label.replace('CATEGORY_', '').slice(1).toLowerCase().replace('_', ' ');
+    return;
+  }
+
+  const q = query.toLowerCase();
+  // Search locally across all loaded items
+  const localMatches = State.mail.items.filter(m => {
+    const headers = {};
+    (m.payload?.headers || []).forEach(h => headers[h.name] = h.value);
+    const from    = (headers['From']    || '').toLowerCase();
+    const to      = (headers['To']      || '').toLowerCase();
+    const subject = (headers['Subject'] || '').toLowerCase();
+    const snippet = (m.snippet          || '').toLowerCase();
+    return from.includes(q) || to.includes(q) || subject.includes(q) || snippet.includes(q);
+  });
+
+  // Show local results immediately
+  renderEmailList(localMatches, true);
+  document.getElementById('list-label').textContent = `🔍 "${query}" — ${localMatches.length} local match${localMatches.length !== 1 ? 'es' : ''}`;
+  // Keep Load More visible so user can load more then search again
+  document.getElementById('btn-load-more-mail').style.display = State.mail.pageToken ? 'block' : 'none';
 }
 
 function updateBatchDeleteBtn() {
@@ -1086,12 +1102,21 @@ let cleanHtml = htmlData;
   }
 
   let safeHtml = doc.documentElement.innerHTML;
+  // ── Fix encoding: the Blob is always UTF-8, but the email's <meta charset> may say
+  // iso-8859-2 / windows-1250 etc. The browser would then mis-decode the UTF-8 blob bytes.
+  // Solution: forcibly replace every <meta charset=...> with <meta charset="utf-8">.
+  safeHtml = safeHtml.replace(/<meta[^>]+charset=[^>]+>/gi, '<meta charset="utf-8">');
+  if (!/<meta\s[^>]*charset/i.test(safeHtml)) {
+    // Ensure a charset meta exists
+    safeHtml = safeHtml.replace(/(<head[^>]*>)/i, '$1<meta charset="utf-8">');
+  }
+
   if (!/<base\s/i.test(safeHtml)) {
-     if (/<head[^>]*>/i.test(safeHtml)) {
-         safeHtml = safeHtml.replace(/(<head[^>]*>)/i, '$1<base target="_blank">');
-     } else {
-         safeHtml = '<base target="_blank">' + safeHtml;
-     }
+    if (/<head[^>]*>/i.test(safeHtml)) {
+      safeHtml = safeHtml.replace(/(<head[^>]*>)/i, '$1<base target="_blank">');
+    } else {
+      safeHtml = '<base target="_blank">' + safeHtml;
+    }
   }
 
   // Build the unblocked version: restore data-blocked-src back to src, remove hidden styles
@@ -1100,15 +1125,12 @@ let cleanHtml = htmlData;
     .replace(/data-blocked-src="/g, 'src="')
     .replace(/style="display: none;"\s*/g, '');
 
+  // ── Fix images: use srcdoc instead of blob URL.
+  // Blob URLs have a null origin and browsers refuse to load cross-origin images from them.
+  // srcdoc inherits the page origin, so external images (LinkedIn logos, etc.) load correctly.
   function loadIframeHtml(iframe, html) {
-    const prev = iframe._blobUrl;
-    // Include a permissive meta so the iframe can load external images
-    const fullHtml = html.includes('<!DOCTYPE') ? html : '<!DOCTYPE html>' + html;
-    const blob = new Blob([fullHtml], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    iframe._blobUrl = url;
-    iframe.src = url;
-    if (prev) setTimeout(() => URL.revokeObjectURL(prev), 5000);
+    const fullHtml = '<!DOCTYPE html>' + html;
+    iframe.srcdoc = fullHtml;
   }
 
   const bodyContainer = el('div', 'email-body');
@@ -1674,21 +1696,23 @@ function openEventModal(event) {
   document.getElementById('event-allday').checked = isAllDay;
   updateAllDayFields(isAllDay);
 
-  // Fix 28: Recurrence
-  const rrule = event?.recurrence?.[0] || '';
+  // Fix: Recurrence — show current rule in dropdown
+  // Instances have recurringEventId but not recurrence[], master has recurrence[]
+  const isRecurringEvent = !!(event?.recurrence?.[0] || event?.recurringEventId);
+  const rruleForDisplay = event?.recurrence?.[0] || '';
   const recSelect = document.getElementById('event-recurrence');
-  // Try to match existing rrule to one of our options
   let matched = '';
-  for (const opt of recSelect.options) {
-    if (opt.value && rrule.startsWith(opt.value)) { matched = opt.value; break; }
+  if (rruleForDisplay) {
+    for (const opt of recSelect.options) {
+      if (opt.value && rruleForDisplay.startsWith(opt.value)) { matched = opt.value; break; }
+    }
   }
   recSelect.value = matched;
-  // Disable recurrence change when editing existing recurring event (use scope instead)
-  recSelect.disabled = !!(event && rrule);
+  recSelect.disabled = isRecurringEvent; // lock when editing existing series
 
-  // Fix 28: Recurrence scope (only for existing recurring events)
+  // Fix: Show scope dropdown for any recurring event (master OR instance)
   const scopeGroup = document.getElementById('event-recurrence-scope-group');
-  scopeGroup.style.display = (event && rrule) ? 'flex' : 'none';
+  scopeGroup.style.display = (event && isRecurringEvent) ? 'flex' : 'none';
   document.getElementById('event-recurrence-scope').value = 'single';
 
   const now = new Date();
@@ -1736,6 +1760,8 @@ async function saveEvent() {
   if (!startVal || !endVal) return toast('Please set start and end', 'error');
 
   let startObj, endObj;
+  // Get the browser's local timezone name (e.g. "Europe/Budapest")
+  const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   if (isAllDay) {
     const startDate = startVal.slice(0, 10);
     const endDate   = endVal.slice(0, 10);
@@ -1746,8 +1772,8 @@ async function saveEvent() {
     startObj = { date: startDate };
     endObj   = { date: endExclStr };
   } else {
-    startObj = { dateTime: new Date(startVal).toISOString() };
-    endObj   = { dateTime: new Date(endVal).toISOString() };
+    startObj = { dateTime: new Date(startVal).toISOString(), timeZone: localTz };
+    endObj   = { dateTime: new Date(endVal).toISOString(),   timeZone: localTz };
   }
 
   const rruleVal = document.getElementById('event-recurrence').value;
