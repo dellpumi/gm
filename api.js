@@ -39,6 +39,9 @@ export const Auth = {
   getClientId:     () => localStorage.getItem('aether_client_id') || '',
   setClientId:     (id) => localStorage.setItem('aether_client_id', id),
 
+  getClientSecret: () => localStorage.getItem('aether_client_secret') || '',
+  setClientSecret: (s) => localStorage.setItem('aether_client_secret', s),
+
   getToken:        () => sessionStorage.getItem('aether_token'),
   getTokenExp:     () => parseInt(sessionStorage.getItem('aether_token_exp') || '0'),
   setToken: (t, exp) => {
@@ -61,6 +64,8 @@ export const Auth = {
     localStorage.removeItem('aether_refresh_token');
     localStorage.removeItem('aether_pkce_verifier');
     localStorage.removeItem('aether_pkce_state');
+    // Note: intentionally keep client_id and client_secret so user doesn't
+    // have to re-enter them after signing out
   },
 
   check: () => {
@@ -100,23 +105,27 @@ export const Auth = {
       return { ok: false, error: 'Security check failed (state mismatch). Please try logging in again.' };
     }
 
-    const verifier   = localStorage.getItem('aether_pkce_verifier');
-    const clientId   = Auth.getClientId();
+    const verifier    = localStorage.getItem('aether_pkce_verifier');
+    const clientId    = Auth.getClientId();
+    const clientSecret = Auth.getClientSecret();
     const redirectUri = Auth.getRedirectUri();
 
     console.log('[Aether] PKCE exchange — redirect_uri:', redirectUri);
 
     try {
+      const exchangeParams = {
+        code,
+        client_id:     clientId,
+        redirect_uri:  redirectUri,
+        grant_type:    'authorization_code',
+        code_verifier: verifier,
+      };
+      if (clientSecret) exchangeParams.client_secret = clientSecret;
+
       const resp = await fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          code,
-          client_id:     clientId,
-          redirect_uri:  redirectUri,
-          grant_type:    'authorization_code',
-          code_verifier: verifier,
-        })
+        body: new URLSearchParams(exchangeParams)
       });
       const data = await resp.json();
       console.log('[Aether] Token exchange response:', JSON.stringify({ ...data, access_token: data.access_token ? '***' : undefined, refresh_token: data.refresh_token ? '***' : undefined }));
@@ -148,14 +157,18 @@ export const Auth = {
     const rt = Auth.getRefreshToken();
     if (!rt) return false;
     try {
+      const refreshParams = {
+        refresh_token: rt,
+        client_id:     Auth.getClientId(),
+        grant_type:    'refresh_token',
+      };
+      const cs = Auth.getClientSecret();
+      if (cs) refreshParams.client_secret = cs;
+
       const resp = await fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          refresh_token: rt,
-          client_id:     Auth.getClientId(),
-          grant_type:    'refresh_token',
-        })
+        body: new URLSearchParams(refreshParams)
       });
       const data = await resp.json();
       if (data.error) {

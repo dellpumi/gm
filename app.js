@@ -336,7 +336,7 @@ function setupEventListeners() {
   document.getElementById('btn-close-setup').addEventListener('click', () => document.getElementById('setup-screen').classList.remove('open'));
   document.getElementById('btn-copy-origin').addEventListener('click', async () => { await navigator.clipboard.writeText(window.location.origin); toast('Copied!', 'success'); });
   document.getElementById('btn-goto-step2').addEventListener('click', () => { document.getElementById('setup-step-1').style.display='none'; document.getElementById('setup-step-2').style.display='block'; });
-  document.getElementById('btn-save-client-id').addEventListener('click', async () => { Auth.setClientId(document.getElementById('client-id-input').value.trim()); await Auth.startLogin(); });
+  document.getElementById('btn-save-client-id').addEventListener('click', async () => { Auth.setClientId(document.getElementById('client-id-input').value.trim()); const sec = document.getElementById('client-secret-input'); if (sec && sec.value.trim()) Auth.setClientSecret(sec.value.trim()); await Auth.startLogin(); });
   
   document.getElementById('btn-sign-out').addEventListener('click', () => confirmAction('Sign Out', 'Are you sure you want to log out? This will clear your local app cache and sever connection.', 'Yes, Sign Out', handleSignOut, true));
 

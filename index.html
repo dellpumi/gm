@@ -33,10 +33,15 @@
       <div class="setup-btns"><button class="setup-btn-primary" id="btn-goto-step2">I've created my Client ID →</button></div>
     </div>
     <div id="setup-step-2" style="display:none">
-      <h2>Enter your Client ID</h2>
+      <h2>Enter your credentials</h2>
       <div class="setup-field">
         <label>OAuth Client ID</label>
         <input type="text" id="client-id-input" placeholder="xxxxxxxxxxxx.apps.googleusercontent.com">
+      </div>
+      <div class="setup-field">
+        <label>OAuth Client Secret</label>
+        <input type="text" id="client-secret-input" placeholder="GOCSPX-…">
+        <small style="color:var(--text2,#888); font-size:11px; margin-top:4px; display:block;">Required for Web Application clients. Stored only in your browser's localStorage.</small>
       </div>
       <div class="setup-btns">
         <button class="btn-cancel" id="btn-close-setup">Back</button>
