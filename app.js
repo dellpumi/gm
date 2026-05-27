@@ -257,7 +257,7 @@ function encodeAddressList(str) {
 document.addEventListener('DOMContentLoaded', async () => {
   setupEventListeners();
 
-  // Session close/restore detection
+  // Tab-close / Ctrl+Shift+T detection
   const CLOSE_TS_KEY = 'aether_close_ts';
   const RELOAD_FLAG  = 'aether_is_reload';
   const closeTs  = parseInt(localStorage.getItem(CLOSE_TS_KEY) || '0', 10);
@@ -265,35 +265,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (closeTs && !isReload) { Auth.clear(); State.token = null; }
   sessionStorage.removeItem(RELOAD_FLAG);
   localStorage.removeItem(CLOSE_TS_KEY);
-
   window.addEventListener('keydown', (e) => {
     if (e.key === 'F5' || (e.ctrlKey && e.key === 'r') || (e.metaKey && e.key === 'r'))
       sessionStorage.setItem(RELOAD_FLAG, '1');
   });
-  window.addEventListener('pagehide', () => {
-    localStorage.setItem(CLOSE_TS_KEY, String(Date.now()));
-    Auth.clear(); State.token = null;
-  });
-  window.addEventListener('beforeunload', () => {
-    localStorage.setItem(CLOSE_TS_KEY, String(Date.now()));
-    Auth.clear(); State.token = null;
-  });
-
+  window.addEventListener('pagehide', () => { localStorage.setItem(CLOSE_TS_KEY, String(Date.now())); Auth.clear(); State.token = null; });
+  window.addEventListener('beforeunload', () => { localStorage.setItem(CLOSE_TS_KEY, String(Date.now())); Auth.clear(); State.token = null; });
   window.addEventListener('offline', () => toast('You are offline. Reconnect to sync.', 'error'));
   window.addEventListener('online',  () => toast('Back online!', 'success'));
 
-  // PKCE: handle redirect back from Google with ?code=
-  const hasCode = new URLSearchParams(window.location.search).has('code');
-  let authed = false;
-  if (hasCode) {
-    authed = await Auth.parseCode();
-  } else if (Auth.check()) {
-    authed = true;
-  } else {
-    authed = await Auth.refresh();
-  }
-
-  if (authed) {
+  async function bootApp() {
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
     startSessionTimer();
@@ -305,10 +286,47 @@ document.addEventListener('DOMContentLoaded', async () => {
       toast(err.message, 'error');
       if (err.message === 'Session expired') handleSignOut();
     }
-  } else {
+  }
+
+  function showLoginError(msg) {
     document.getElementById('login-screen').style.display = 'flex';
     document.getElementById('app').style.display = 'none';
+    // Show error below the login button
+    let errEl = document.getElementById('login-error-msg');
+    if (!errEl) {
+      errEl = document.createElement('p');
+      errEl.id = 'login-error-msg';
+      errEl.style.cssText = 'color:#e05b5b;font-size:13px;margin-top:12px;text-align:center;max-width:320px;';
+      document.querySelector('.login-card').appendChild(errEl);
+    }
+    errEl.textContent = msg;
   }
+
+  // PKCE: ?code= returned from Google
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.has('code') || urlParams.has('error')) {
+    const result = await Auth.parseCode();
+    if (result.ok) {
+      await bootApp();
+    } else if (result.error) {
+      showLoginError(result.error);
+    } else {
+      // No code, no error — shouldn't happen, just show login
+      document.getElementById('login-screen').style.display = 'flex';
+    }
+    return;
+  }
+
+  // Already have a valid access token (same session)
+  if (Auth.check()) { await bootApp(); return; }
+
+  // Try silent refresh with stored refresh token
+  const refreshed = await Auth.refresh();
+  if (refreshed) { await bootApp(); return; }
+
+  // No valid session — show login screen
+  document.getElementById('login-screen').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
 });
 
 // ===== EVENT BINDING =====
@@ -560,17 +578,14 @@ function startSessionTimer() {
   clearInterval(State.timerInterval);
   State.timerInterval = setInterval(async () => {
     const remain = Math.floor((Auth.getTokenExp() - Date.now()) / 1000);
-    const textEl = document.getElementById('timer-text');
+    const textEl  = document.getElementById('timer-text');
     if (remain <= 0) {
-      // Try silent refresh before signing out
       const ok = await Auth.refresh();
-      if (!ok) { textEl.textContent = "00:00"; handleSignOut(); }
-      else textEl.style.color = '';
+      if (!ok) { textEl.textContent = '00:00'; handleSignOut(); }
     } else {
-      textEl.textContent = `${Math.floor(remain / 60).toString().padStart(2,'0')}:${(remain % 60).toString().padStart(2,'0')}`;
-      textEl.style.color = remain < 300 ? 'var(--red)' : '';
-      // Pre-emptive refresh at 5 minutes remaining
-      if (remain === 290) Auth.refresh().catch(() => {});
+      textEl.textContent = `${Math.floor(remain/60).toString().padStart(2,'0')}:${(remain%60).toString().padStart(2,'0')}`;
+      textEl.style.color = remain < 300 ? 'var(--red,#e05b5b)' : '';
+      if (remain === 290) Auth.refresh().catch(() => {}); // pre-emptive refresh at 5 min
     }
   }, 1000);
 }
@@ -578,11 +593,8 @@ function startSessionTimer() {
 async function handleSignOut() {
   if (State.token) {
     try {
-      await fetch(`https://oauth2.googleapis.com/revoke?token=${State.token}`, {
-        method: 'POST',
-        headers: { 'Content-type': 'application/x-www-form-urlencoded' }
-      });
-    } catch (e) { console.warn("Revocation failed", e); }
+      await fetch(`https://oauth2.googleapis.com/revoke?token=${State.token}`, { method: 'POST', headers: { 'Content-type': 'application/x-www-form-urlencoded' } });
+    } catch (e) { console.warn('Revocation failed', e); }
   }
   Auth.clearAll();
   State.token = null;
@@ -633,13 +645,10 @@ async function loadEmails(label, loadMore = false) {
   btnMore.style.display = 'none';
 
   if (!loadMore) {
-    State.mail.items = [];
+    State.mail.items =[];
     State.mail.pageToken = null;
     loadingState(container);
     hideEmailDetail();
-    // Reset the label heading
-    const labelNames = { INBOX: 'Inbox', SENT: 'Sent', STARRED: 'Starred', DRAFT: 'Drafts', SPAM: 'Spam', TRASH: 'Trash', CATEGORY_PROMOTIONS: 'Promotions', CATEGORY_SOCIAL: 'Social', CATEGORY_UPDATES: 'Updates', CATEGORY_FORUMS: 'Forums' };
-    document.getElementById('list-label').textContent = labelNames[label] || label;
   }
 
   const q = encodeURIComponent(label === 'STARRED' ? 'is:starred' : '');
@@ -670,31 +679,15 @@ async function loadEmails(label, loadMore = false) {
 }
 
 async function searchEmails(query) {
-  if (!query.trim()) {
-    // Restore full list view
-    renderEmailList(State.mail.items, true);
-    document.getElementById('btn-load-more-mail').style.display = State.mail.pageToken ? 'block' : 'none';
-    document.getElementById('list-label').textContent = State.mail.label.replace('CATEGORY_', '').charAt(0) + State.mail.label.replace('CATEGORY_', '').slice(1).toLowerCase().replace('_', ' ');
-    return;
-  }
-
-  const q = query.toLowerCase();
-  // Search locally across all loaded items
-  const localMatches = State.mail.items.filter(m => {
-    const headers = {};
-    (m.payload?.headers || []).forEach(h => headers[h.name] = h.value);
-    const from    = (headers['From']    || '').toLowerCase();
-    const to      = (headers['To']      || '').toLowerCase();
-    const subject = (headers['Subject'] || '').toLowerCase();
-    const snippet = (m.snippet          || '').toLowerCase();
-    return from.includes(q) || to.includes(q) || subject.includes(q) || snippet.includes(q);
-  });
-
-  // Show local results immediately
-  renderEmailList(localMatches, true);
-  document.getElementById('list-label').textContent = `🔍 "${query}" — ${localMatches.length} local match${localMatches.length !== 1 ? 'es' : ''}`;
-  // Keep Load More visible so user can load more then search again
-  document.getElementById('btn-load-more-mail').style.display = State.mail.pageToken ? 'block' : 'none';
+  if (!query.trim()) return renderEmailList(State.mail.items, true);
+  const container = document.getElementById('email-list');
+  loadingState(container);
+  try {
+    const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=${encodeURIComponent(query)}`);
+    if (!data.messages) return emptyState(container, 'No results');
+    const msgs = await Promise.all(data.messages.map(m => gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`)));
+    renderEmailList(msgs, true);
+  } catch (e) { toast('Search failed', 'error'); }
 }
 
 function updateBatchDeleteBtn() {
@@ -1102,21 +1095,12 @@ let cleanHtml = htmlData;
   }
 
   let safeHtml = doc.documentElement.innerHTML;
-  // ── Fix encoding: the Blob is always UTF-8, but the email's <meta charset> may say
-  // iso-8859-2 / windows-1250 etc. The browser would then mis-decode the UTF-8 blob bytes.
-  // Solution: forcibly replace every <meta charset=...> with <meta charset="utf-8">.
-  safeHtml = safeHtml.replace(/<meta[^>]+charset=[^>]+>/gi, '<meta charset="utf-8">');
-  if (!/<meta\s[^>]*charset/i.test(safeHtml)) {
-    // Ensure a charset meta exists
-    safeHtml = safeHtml.replace(/(<head[^>]*>)/i, '$1<meta charset="utf-8">');
-  }
-
   if (!/<base\s/i.test(safeHtml)) {
-    if (/<head[^>]*>/i.test(safeHtml)) {
-      safeHtml = safeHtml.replace(/(<head[^>]*>)/i, '$1<base target="_blank">');
-    } else {
-      safeHtml = '<base target="_blank">' + safeHtml;
-    }
+     if (/<head[^>]*>/i.test(safeHtml)) {
+         safeHtml = safeHtml.replace(/(<head[^>]*>)/i, '$1<base target="_blank">');
+     } else {
+         safeHtml = '<base target="_blank">' + safeHtml;
+     }
   }
 
   // Build the unblocked version: restore data-blocked-src back to src, remove hidden styles
@@ -1125,12 +1109,15 @@ let cleanHtml = htmlData;
     .replace(/data-blocked-src="/g, 'src="')
     .replace(/style="display: none;"\s*/g, '');
 
-  // ── Fix images: use srcdoc instead of blob URL.
-  // Blob URLs have a null origin and browsers refuse to load cross-origin images from them.
-  // srcdoc inherits the page origin, so external images (LinkedIn logos, etc.) load correctly.
   function loadIframeHtml(iframe, html) {
-    const fullHtml = '<!DOCTYPE html>' + html;
-    iframe.srcdoc = fullHtml;
+    const prev = iframe._blobUrl;
+    // Include a permissive meta so the iframe can load external images
+    const fullHtml = html.includes('<!DOCTYPE') ? html : '<!DOCTYPE html>' + html;
+    const blob = new Blob([fullHtml], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    iframe._blobUrl = url;
+    iframe.src = url;
+    if (prev) setTimeout(() => URL.revokeObjectURL(prev), 5000);
   }
 
   const bodyContainer = el('div', 'email-body');
@@ -1696,23 +1683,21 @@ function openEventModal(event) {
   document.getElementById('event-allday').checked = isAllDay;
   updateAllDayFields(isAllDay);
 
-  // Fix: Recurrence — show current rule in dropdown
-  // Instances have recurringEventId but not recurrence[], master has recurrence[]
-  const isRecurringEvent = !!(event?.recurrence?.[0] || event?.recurringEventId);
-  const rruleForDisplay = event?.recurrence?.[0] || '';
+  // Fix 28: Recurrence
+  const rrule = event?.recurrence?.[0] || '';
   const recSelect = document.getElementById('event-recurrence');
+  // Try to match existing rrule to one of our options
   let matched = '';
-  if (rruleForDisplay) {
-    for (const opt of recSelect.options) {
-      if (opt.value && rruleForDisplay.startsWith(opt.value)) { matched = opt.value; break; }
-    }
+  for (const opt of recSelect.options) {
+    if (opt.value && rrule.startsWith(opt.value)) { matched = opt.value; break; }
   }
   recSelect.value = matched;
-  recSelect.disabled = isRecurringEvent; // lock when editing existing series
+  // Disable recurrence change when editing existing recurring event (use scope instead)
+  recSelect.disabled = !!(event && rrule);
 
-  // Fix: Show scope dropdown for any recurring event (master OR instance)
+  // Fix 28: Recurrence scope (only for existing recurring events)
   const scopeGroup = document.getElementById('event-recurrence-scope-group');
-  scopeGroup.style.display = (event && isRecurringEvent) ? 'flex' : 'none';
+  scopeGroup.style.display = (event && rrule) ? 'flex' : 'none';
   document.getElementById('event-recurrence-scope').value = 'single';
 
   const now = new Date();
@@ -1760,8 +1745,6 @@ async function saveEvent() {
   if (!startVal || !endVal) return toast('Please set start and end', 'error');
 
   let startObj, endObj;
-  // Get the browser's local timezone name (e.g. "Europe/Budapest")
-  const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   if (isAllDay) {
     const startDate = startVal.slice(0, 10);
     const endDate   = endVal.slice(0, 10);
@@ -1772,8 +1755,8 @@ async function saveEvent() {
     startObj = { date: startDate };
     endObj   = { date: endExclStr };
   } else {
-    startObj = { dateTime: new Date(startVal).toISOString(), timeZone: localTz };
-    endObj   = { dateTime: new Date(endVal).toISOString(),   timeZone: localTz };
+    startObj = { dateTime: new Date(startVal).toISOString() };
+    endObj   = { dateTime: new Date(endVal).toISOString() };
   }
 
   const rruleVal = document.getElementById('event-recurrence').value;
