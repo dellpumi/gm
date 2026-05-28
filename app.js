@@ -257,24 +257,54 @@ function encodeAddressList(str) {
 document.addEventListener('DOMContentLoaded', async () => {
   setupEventListeners();
 
-  // Tab-close / Ctrl+Shift+T detection
+  // ── Tab-close / reload detection ─────────────────────────────────────────
+  // On a REAL close (tab closed, window closed, browser quit):  clearAll() — wipes
+  //   refresh token + login timestamp so an unauthorised person can't resume the session.
+  // On a RELOAD (F5, Ctrl+R): only clear() — keeps refresh token so the page can
+  //   silently re-authenticate without forcing the user back to the login screen.
   const CLOSE_TS_KEY = 'aether_close_ts';
   const RELOAD_FLAG  = 'aether_is_reload';
+
   const closeTs  = parseInt(localStorage.getItem(CLOSE_TS_KEY) || '0', 10);
-  const isReload = sessionStorage.getItem(RELOAD_FLAG) === '1';
-  if (closeTs && !isReload) { Auth.clear(); State.token = null; }
+  const wasReload = sessionStorage.getItem(RELOAD_FLAG) === '1';
+  if (closeTs && !wasReload) {
+    // Real close detected → wipe everything for security
+    Auth.clearAll();
+    State.token = null;
+  }
   sessionStorage.removeItem(RELOAD_FLAG);
   localStorage.removeItem(CLOSE_TS_KEY);
+
   window.addEventListener('keydown', (e) => {
     if (e.key === 'F5' || (e.ctrlKey && e.key === 'r') || (e.metaKey && e.key === 'r'))
       sessionStorage.setItem(RELOAD_FLAG, '1');
   });
-  window.addEventListener('pagehide', () => { localStorage.setItem(CLOSE_TS_KEY, String(Date.now())); Auth.clear(); State.token = null; });
-  window.addEventListener('beforeunload', () => { localStorage.setItem(CLOSE_TS_KEY, String(Date.now())); Auth.clear(); State.token = null; });
+
+  function handlePageClose() {
+    const isReload = sessionStorage.getItem(RELOAD_FLAG) === '1';
+    localStorage.setItem(CLOSE_TS_KEY, String(Date.now()));
+    if (isReload) {
+      Auth.clear(); // reload: keep refresh token for silent re-auth
+    } else {
+      Auth.clearAll(); // real close: wipe everything for security
+    }
+    State.token = null;
+  }
+  window.addEventListener('pagehide',     handlePageClose);
+  window.addEventListener('beforeunload', handlePageClose);
   window.addEventListener('offline', () => toast('You are offline. Reconnect to sync.', 'error'));
   window.addEventListener('online',  () => toast('Back online!', 'success'));
 
   async function bootApp() {
+    // Guard: if the 9-hour wall-clock limit has already expired, refuse boot.
+    if (Auth.isSessionExpired()) {
+      Auth.clearAll();
+      State.token = null;
+      showLoginError('Your 9-hour session has expired. Please sign in again.');
+      document.getElementById('login-screen').style.display = 'flex';
+      document.getElementById('app').style.display = 'none';
+      return;
+    }
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
     startSessionTimer();
@@ -282,21 +312,24 @@ document.addEventListener('DOMContentLoaded', async () => {
       await loadUserInfo();
       await loadEmails('INBOX');
       loadAllContactsForAutocomplete();
+      startInboxPoll(); // #9 — begin 5-minute background poll
     } catch (err) {
-      toast(err.message, 'error');
-      if (err.message === 'Session expired') handleSignOut();
+      if (err.message === 'SESSION_EXPIRED' || err.message === 'Session expired') {
+        handleSignOut();
+      } else {
+        toast(err.message, 'error');
+      }
     }
   }
 
   function showLoginError(msg) {
     document.getElementById('login-screen').style.display = 'flex';
     document.getElementById('app').style.display = 'none';
-    // Show error below the login button
     let errEl = document.getElementById('login-error-msg');
     if (!errEl) {
       errEl = document.createElement('p');
       errEl.id = 'login-error-msg';
-      errEl.style.cssText = 'color:#e05b5b;font-size:13px;margin-top:12px;text-align:center;max-width:320px;';
+      errEl.style.cssText = 'color:var(--red,#f87171);font-size:13px;margin-top:14px;text-align:center;';
       document.querySelector('.login-card').appendChild(errEl);
     }
     errEl.textContent = msg;
@@ -331,13 +364,48 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // ===== EVENT BINDING =====
 function setupEventListeners() {
-  document.getElementById('btn-login').addEventListener('click', async () => { if (!await Auth.startLogin()) document.getElementById('setup-screen').classList.add('open'); });
-  document.getElementById('link-setup').addEventListener('click', (e) => { e.preventDefault(); document.getElementById('setup-screen').classList.add('open'); });
-  document.getElementById('btn-close-setup').addEventListener('click', () => document.getElementById('setup-screen').classList.remove('open'));
-  document.getElementById('btn-copy-origin').addEventListener('click', async () => { await navigator.clipboard.writeText(window.location.origin); toast('Copied!', 'success'); });
-  document.getElementById('btn-goto-step2').addEventListener('click', () => { document.getElementById('setup-step-1').style.display='none'; document.getElementById('setup-step-2').style.display='block'; });
-  document.getElementById('btn-save-client-id').addEventListener('click', async () => { Auth.setClientId(document.getElementById('client-id-input').value.trim()); const sec = document.getElementById('client-secret-input'); if (sec && sec.value.trim()) Auth.setClientSecret(sec.value.trim()); await Auth.startLogin(); });
-  
+  // ── bfcache (back-forward cache) Ctrl+Z restore guard ─────────────────────
+  // When a user closes a tab and restores it with Ctrl+Z (or Ctrl+Shift+T),
+  // Chrome/Firefox may resurrect the page from bfcache — a frozen memory snapshot
+  // that bypasses DOMContentLoaded entirely. The beforeunload/pagehide handlers did
+  // run and wiped auth from storage, but the in-memory State.token from the snapshot
+  // is still alive. The pageshow event with persisted:true fires in this exact case.
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) {
+      // Page was restored from bfcache — auth storage was already cleared on close.
+      // Force a full page reload so the app starts fresh from storage (login screen).
+      console.warn('[Aether] bfcache restore detected — forcing reload for security.');
+      window.location.reload();
+    }
+  });
+
+  // ── Single-screen login ────────────────────────────────────────────────────
+  // Pre-fill inputs from saved localStorage values so returning users don't need
+  // to retype their credentials every time.
+  const savedClientId     = Auth.getClientId();
+  const savedClientSecret = Auth.getClientSecret();
+  const cidInput = document.getElementById('client-id-input');
+  const secInput = document.getElementById('client-secret-input');
+  if (savedClientId     && cidInput) cidInput.value = savedClientId;
+  if (savedClientSecret && secInput) secInput.value = savedClientSecret;
+
+  document.getElementById('btn-login').addEventListener('click', async () => {
+    const cid = cidInput?.value.trim() || '';
+    const sec = secInput?.value.trim() || '';
+    if (!cid) {
+      showLoginError('Please enter your OAuth Client ID.');
+      return;
+    }
+    Auth.setClientId(cid);
+    if (sec) Auth.setClientSecret(sec);
+    await Auth.startLogin();
+  });
+
+  // Allow Enter key in either input to trigger sign-in
+  [cidInput, secInput].forEach(inp => inp?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('btn-login').click();
+  }));
+
   document.getElementById('btn-sign-out').addEventListener('click', () => confirmAction('Sign Out', 'Are you sure you want to log out? This will clear your local app cache and sever connection.', 'Yes, Sign Out', handleSignOut, true));
 
   // Fix 19: Batch delete
@@ -576,16 +644,114 @@ function attachAutocomplete(input) {
 
 function startSessionTimer() {
   clearInterval(State.timerInterval);
+  State._sessionExpiredToastShown = false;
+
+  // ── Session expiry check (shared by timer tick and wake-from-sleep) ───────
+  function checkExpiry() {
+    if (!Auth.getLoginTime()) return false;
+    if (Auth.isSessionExpired()) {
+      clearInterval(State.timerInterval);
+      removeWakeListeners();
+      if (!State._sessionExpiredToastShown) {
+        State._sessionExpiredToastShown = true;
+        toast('Your 9-hour session has expired. Signing out for security…', 'error');
+      }
+      setTimeout(handleSignOut, 2500);
+      return true;
+    }
+    return false;
+  }
+
+  // ── Wake-from-sleep detection via visibility / focus events ───────────────
+  // These catch screen-sleep on many OS/browser combos even when the app
+  // stays in the foreground (device lock, lid close, etc.).
+  function onWake() { checkExpiry(); }
+  document.addEventListener('visibilitychange', onWake);
+  window.addEventListener('focus', onWake);
+  State._sessionWakeListeners = onWake;
+
+  function removeWakeListeners() {
+    if (State._sessionWakeListeners) {
+      document.removeEventListener('visibilitychange', State._sessionWakeListeners);
+      window.removeEventListener('focus', State._sessionWakeListeners);
+      State._sessionWakeListeners = null;
+    }
+  }
+
+  // ── Heartbeat drift detector ───────────────────────────────────────────────
+  // When the device sleeps and wakes with the app already on screen, neither
+  // visibilitychange nor focus fires.  The solution: track the real wall-clock
+  // gap between consecutive 1-second ticks.  If the gap > 3 s (3× the interval),
+  // the device was asleep → run an immediate expiry check.
+  let lastTick = Date.now();
+
   State.timerInterval = setInterval(async () => {
-    const remain = Math.floor((Auth.getTokenExp() - Date.now()) / 1000);
-    const textEl  = document.getElementById('timer-text');
-    if (remain <= 0) {
+    const now     = Date.now();
+    const tickGap = now - lastTick;
+    lastTick = now;
+
+    if (tickGap > 3000) {
+      console.log(`[Aether] Wake-from-sleep detected via timer drift (gap: ${tickGap}ms)`);
+    }
+
+    // Expiry check on every tick (catches wake-from-sleep via drift + regular time passage)
+    if (checkExpiry()) return;
+
+    // ── Compute remaining times ──────────────────────────────────────────────
+    const SESSION_MAX_MS = Auth.SESSION_MAX_MS;                          // 9 h
+    const loginTime      = Auth.getLoginTime();
+    const tokenExp       = Auth.getTokenExp();
+
+    const tokenRemainMs = Math.max(0, tokenExp - now);
+    const totalRemainMs = loginTime ? Math.max(0, loginTime + SESSION_MAX_MS - now) : 0;
+
+    // ── Token expired → try refresh (still within 9-hour window) ────────────
+    if (tokenRemainMs <= 0) {
       const ok = await Auth.refresh();
-      if (!ok) { textEl.textContent = '00:00'; handleSignOut(); }
-    } else {
-      textEl.textContent = `${Math.floor(remain/60).toString().padStart(2,'0')}:${(remain%60).toString().padStart(2,'0')}`;
-      textEl.style.color = remain < 300 ? 'var(--red,#e05b5b)' : '';
-      if (remain === 290) Auth.refresh().catch(() => {}); // pre-emptive refresh at 5 min
+      if (!ok) { handleSignOut(); return; }
+    }
+
+    // ── Pre-emptive refresh at ~5 min remaining on current token ─────────────
+    if (tokenRemainMs > 0 && tokenRemainMs < 300000 && tokenRemainMs > 295000) {
+      Auth.refresh().catch(() => {});
+    }
+
+    // ── Format slot countdown (current 1-hour token) ─────────────────────────
+    const slotM  = Math.floor(tokenRemainMs / 60000);
+    const slotS  = Math.floor((tokenRemainMs % 60000) / 1000);
+    const slotTxt = `${String(slotM).padStart(2,'0')}:${String(slotS).padStart(2,'0')}`;
+
+    // ── Format total remaining ────────────────────────────────────────────────
+    const totalH  = Math.floor(totalRemainMs / 3600000);
+    const totalM  = Math.floor((totalRemainMs % 3600000) / 60000);
+    const totalS  = Math.floor((totalRemainMs % 60000) / 1000);
+    const totalTxt = `${totalH}h ${String(totalM).padStart(2,'0')}:${String(totalS).padStart(2,'0')}`;
+
+    // Renewals = how many more full-hour refreshes fit inside the remaining window.
+    // Example: 8h 40m remaining → 8 renewals left.
+    const renewals = Math.floor(totalRemainMs / 3600000);
+    const renewalTxt = `${renewals} renewal${renewals !== 1 ? 's' : ''} left`;
+
+    // ── Update DOM ────────────────────────────────────────────────────────────
+    const slotEl    = document.getElementById('timer-slot');
+    const renewalEl = document.getElementById('timer-renewals');
+    const totalEl   = document.getElementById('timer-total');
+
+    if (slotEl)    slotEl.textContent    = slotTxt;
+    if (renewalEl) renewalEl.textContent = renewalTxt;
+    if (totalEl)   totalEl.textContent   = totalTxt;
+
+    // ── Colour warnings ───────────────────────────────────────────────────────
+    if (slotEl)  slotEl.style.color  = tokenRemainMs < 300000  ? 'var(--red)'    : '';
+    if (totalEl) totalEl.style.color = totalRemainMs < 900000  ? 'var(--red)'    :
+                                       totalRemainMs < 1800000 ? 'var(--yellow)' : '';
+
+    // ── One-time warning toast at 30 minutes total remaining ─────────────────
+    if (totalRemainMs > 0 && totalRemainMs < 1800000 && !State._sessionExpiredToastShown) {
+      const minsLeft = Math.ceil(totalRemainMs / 60000);
+      if (totalRemainMs < 1802000 && totalRemainMs > 1798000) { // fire once around 30 min mark
+        toast(`⚠ ${minsLeft} minutes of your 9-hour session remain.`, 'error');
+      }
     }
   }, 1000);
 }
@@ -599,6 +765,13 @@ async function handleSignOut() {
   Auth.clearAll();
   State.token = null;
   clearInterval(State.timerInterval);
+  stopInboxPoll(); // stop background poll on sign-out
+  // Clean up wake-from-sleep listeners
+  if (State._sessionWakeListeners) {
+    document.removeEventListener('visibilitychange', State._sessionWakeListeners);
+    window.removeEventListener('focus', State._sessionWakeListeners);
+    State._sessionWakeListeners = null;
+  }
   document.getElementById('app').style.display = 'none';
   document.getElementById('login-screen').style.display = 'flex';
   toast('Signed out successfully', 'info');
@@ -639,22 +812,24 @@ async function loadEmails(label, loadMore = false) {
   if (State.mail.isFetching) return;
   State.mail.isFetching = true;
   State.mail.label = label;
-  
+
   const container = document.getElementById('email-list');
-  const btnMore = document.getElementById('btn-load-more-mail');
+  const btnMore   = document.getElementById('btn-load-more-mail');
   btnMore.style.display = 'none';
 
   if (!loadMore) {
-    State.mail.items =[];
+    State.mail.items = [];
     State.mail.pageToken = null;
     loadingState(container);
     hideEmailDetail();
   }
 
-  const q = encodeURIComponent(label === 'STARRED' ? 'is:starred' : '');
-  const labelId = label === 'STARRED' ? '' : `&labelIds=${label}`;
+  const q        = encodeURIComponent(label === 'STARRED' ? 'is:starred' : '');
+  const labelId  = label === 'STARRED' ? '' : `&labelIds=${label}`;
   const pageParam = loadMore && State.mail.pageToken ? `&pageToken=${State.mail.pageToken}` : '';
-  const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=30${labelId}${pageParam}${q ? '&q=' + q : ''}`;
+  // #8 — load 100 on initial fetch, 30 for "load more" pages
+  const maxResults = loadMore ? 30 : 100;
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${maxResults}${labelId}${pageParam}${q ? '&q=' + q : ''}`;
 
   try {
     const data = await gapi('GET', url);
@@ -676,6 +851,118 @@ async function loadEmails(label, loadMore = false) {
 
   } catch (err) { toast(`Failed to load mail: ${err.message}`, 'error'); }
   State.mail.isFetching = false;
+}
+
+// #9 — Silent background poll: checks for new messages every 5 minutes.
+// If new ones are found they are prepended to the list without disturbing
+// whatever the user has open. Works only when the mail panel shows INBOX
+// (or any label-based view — not search results).
+async function pollInbox() {
+  // Only poll when actually looking at mail, not calendar/contacts/search
+  if (State.currentPanel !== 'mail') return;
+  if (State.mail.isFetching)         return;
+  if (!State.token)                  return;
+
+  try {
+    const label   = State.mail.label;
+    const q       = encodeURIComponent(label === 'STARRED' ? 'is:starred' : '');
+    const labelId = label === 'STARRED' ? '' : `&labelIds=${label}`;
+    const url     = `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20${labelId}${q ? '&q=' + q : ''}`;
+
+    const data = await gapi('GET', url);
+    if (!data.messages || !data.messages.length) return;
+
+    // Find message IDs that are not already in the list
+    const knownIds = new Set(State.mail.items.map(m => m.id));
+    const freshIds = data.messages.map(m => m.id).filter(id => !knownIds.has(id));
+    if (freshIds.length === 0) return;
+
+    // Fetch metadata for the genuinely new messages
+    const freshMsgs = await Promise.all(freshIds.map(id =>
+      gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`)
+    ));
+
+    // Prepend to state and DOM without touching the open email detail
+    State.mail.items = [...freshMsgs, ...State.mail.items];
+
+    const container = document.getElementById('email-list');
+    // Insert new rows at the top, preserving the existing DOM rows below
+    const tempFrag = document.createDocumentFragment();
+    freshMsgs.forEach(m => {
+      const headers  = {};
+      (m.payload?.headers || []).forEach(h => headers[h.name] = h.value);
+      const isUnread  = m.labelIds?.includes('UNREAD');
+      const isStarred = m.labelIds?.includes('STARRED');
+      const fromStr   = decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(headers['From'] || 'Unknown')));
+      const ts        = formatTimestamp(headers['Date']);
+
+      const div = el('div', `email-item ${isUnread ? 'unread' : ''} ${isStarred ? 'starred' : ''} new-arrival`);
+      div.dataset.msgId = m.id;
+
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.className = 'email-checkbox';
+      cb.addEventListener('change', (e) => { e.stopPropagation(); div.classList.toggle('selected', cb.checked); updateBatchDeleteBtn(); });
+      cb.addEventListener('click',  (e) => e.stopPropagation());
+      div.appendChild(cb);
+
+      const metaObj = el('div', 'email-meta');
+      const displayUser = label === 'SENT'
+        ? 'To: ' + (decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(headers['To'] || ''))).split(',')[0].trim())
+        : fromStr.replace(/<[^>]*>/, '').trim() || fromStr;
+      metaObj.append(el('span', 'email-from', displayUser), el('span', 'email-date', ts));
+
+      const subj = decodeEntities(decodeRFC2047(headers['Subject']) || '(no subject)');
+      const snip = decodeEntities(decodeRFC2047(m.snippet) || '');
+      div.append(metaObj, el('div', 'email-subject', subj), el('div', 'email-snippet', snip));
+      div.addEventListener('click', () => openEmail(m, div));
+      tempFrag.appendChild(div);
+    });
+
+    // Prepend the fragment before the first existing row
+    const firstChild = container.firstChild;
+    if (firstChild) container.insertBefore(tempFrag, firstChild);
+    else            container.appendChild(tempFrag);
+
+    // Brief fade-in highlight so the user notices the new arrivals
+    container.querySelectorAll('.new-arrival').forEach(row => {
+      setTimeout(() => row.classList.remove('new-arrival'), 2500);
+    });
+
+    // Subtle toast — don't interrupt with a loud alert
+    const count = freshMsgs.length;
+    toast(`📬 ${count} new message${count > 1 ? 's' : ''} arrived`, 'success');
+
+    // Update unread badge
+    updateUnreadBadge();
+
+  } catch (e) {
+    // Silent failure — polls are background work, don't alarm the user
+    console.warn('[Aether] Poll failed:', e.message);
+  }
+}
+
+function startInboxPoll() {
+  stopInboxPoll();
+  State.pollInterval = setInterval(pollInbox, 5 * 60 * 1000); // every 5 minutes
+}
+
+function stopInboxPoll() {
+  if (State.pollInterval) {
+    clearInterval(State.pollInterval);
+    State.pollInterval = null;
+  }
+}
+
+function updateUnreadBadge() {
+  const unreadCount = State.mail.items.filter(m => m.labelIds?.includes('UNREAD')).length;
+  const badge = document.getElementById('unread-badge');
+  if (!badge) return;
+  if (unreadCount > 0) {
+    badge.textContent = unreadCount > 99 ? '99+' : String(unreadCount);
+    badge.style.display = 'inline';
+  } else {
+    badge.style.display = 'none';
+  }
 }
 
 async function searchEmails(query) {
@@ -716,7 +1003,8 @@ function renderEmailList(msgs, clearFirst) {
     let displayUser = State.mail.label === 'SENT' ? 'To: ' + sentTo : fromStr.replace(/<[^>]*>/, '').trim() || fromStr;
     const ts = formatTimestamp(headers['Date']);
 
-    const div = el('div', `email-item ${isUnread ? 'unread' : ''}`);
+    const isStarred = m.labelIds && m.labelIds.includes('STARRED');
+    const div = el('div', `email-item ${isUnread ? 'unread' : ''} ${isStarred ? 'starred' : ''}`);
     div.dataset.msgId = m.id;
 
     // Fix 19: Checkbox
@@ -1656,17 +1944,76 @@ function renderCalendarGrid(eventsToRender = null) {
   });
 }
 
+// ── Recurring-event scope picker ──────────────────────────────────────────────
+// Called when the user clicks an event chip. If it is part of a series, shows a
+// compact inline dialog asking "just this one / this and following / all". The
+// chosen scope is stored on the event object and forwarded to openEventModalFill.
 function openEventModal(event) {
+  if (!event) {
+    // New event — no series prompt needed
+    openEventModalFill(event, null);
+    return;
+  }
+
+  const isRecurring = !!(event.recurrence?.[0] || event.recurringEventId);
+  if (!isRecurring) {
+    openEventModalFill(event, null);
+    return;
+  }
+
+  // Show the scope-picker dialog via the confirm modal (reused for neatness)
+  // We repurpose it with custom buttons instead of the generic Yes/No pair.
+  const overlay = document.getElementById('confirm-modal');
+  document.getElementById('confirm-title').textContent = 'Edit recurring event';
+  document.getElementById('confirm-title').style.color = 'var(--text)';
+  document.getElementById('confirm-msg').textContent =
+    `"${event.summary || 'This event'}" is part of a series. Which occurrences do you want to edit?`;
+
+  // Swap out the two generic buttons for three scope buttons
+  const footer = overlay.querySelector('.modal-footer');
+  const origHTML = footer.innerHTML;
+
+  footer.innerHTML = `
+    <button class="btn-cancel"  id="rc-cancel">Cancel</button>
+    <button class="btn-save"    id="rc-single"   style="background:var(--surface3);color:var(--text);border:1px solid var(--border2);">This event only</button>
+    <button class="btn-save"    id="rc-following" style="background:var(--surface3);color:var(--text);border:1px solid var(--border2);">This &amp; following</button>
+    <button class="btn-save"    id="rc-all"      style="background:var(--accent);">All events</button>
+  `;
+
+  function closeAndRestore() {
+    overlay.classList.remove('open');
+    footer.innerHTML = origHTML;
+    // Re-attach original confirm modal buttons
+    document.getElementById('btn-confirm-no').addEventListener('click', () => overlay.classList.remove('open'));
+  }
+
+  overlay.classList.add('open');
+  document.getElementById('rc-cancel').addEventListener('click', closeAndRestore);
+  document.getElementById('rc-single').addEventListener('click', () => {
+    closeAndRestore();
+    openEventModalFill(event, 'single');
+  });
+  document.getElementById('rc-following').addEventListener('click', () => {
+    closeAndRestore();
+    openEventModalFill(event, 'following');
+  });
+  document.getElementById('rc-all').addEventListener('click', () => {
+    closeAndRestore();
+    openEventModalFill(event, 'all');
+  });
+}
+
+function openEventModalFill(event, recurScope) {
   State.calendar.editingEventId = event?.id || null;
   State.calendar.editingCalendarId = event?.calendarId || null;
   State.calendar.editingEvent = event || null;
 
   document.getElementById('event-modal-title').textContent = event ? 'Edit Event' : 'New Event';
-  document.getElementById('event-title').value = event?.summary || '';
-  document.getElementById('event-location').value = event?.location || '';
-  document.getElementById('event-desc').value = event?.description || '';
+  document.getElementById('event-title').value    = event?.summary     || '';
+  document.getElementById('event-location').value = event?.location    || '';
+  document.getElementById('event-desc').value     = event?.description || '';
 
-  // Fix 27: Show/hide delete button
+  // Show/hide delete button
   const btnDel = document.getElementById('btn-delete-event');
   btnDel.style.display = event ? 'inline-flex' : 'none';
 
@@ -1678,27 +2025,30 @@ function openEventModal(event) {
     calSelect.selectedIndex = 0;
   }
 
-  // Fix 28: All-day toggle
+  // All-day toggle
   const isAllDay = event ? (!event.start?.dateTime && !!event.start?.date) : false;
   document.getElementById('event-allday').checked = isAllDay;
   updateAllDayFields(isAllDay);
 
-  // Fix 28: Recurrence
+  // Recurrence rule display
   const rrule = event?.recurrence?.[0] || '';
   const recSelect = document.getElementById('event-recurrence');
-  // Try to match existing rrule to one of our options
   let matched = '';
   for (const opt of recSelect.options) {
     if (opt.value && rrule.startsWith(opt.value)) { matched = opt.value; break; }
   }
   recSelect.value = matched;
-  // Disable recurrence change when editing existing recurring event (use scope instead)
   recSelect.disabled = !!(event && rrule);
 
-  // Fix 28: Recurrence scope (only for existing recurring events)
+  // Recurrence scope — pre-set from the picker dialog answer
+  const isRecurring = !!(event && (rrule || event.recurringEventId));
   const scopeGroup = document.getElementById('event-recurrence-scope-group');
-  scopeGroup.style.display = (event && rrule) ? 'flex' : 'none';
-  document.getElementById('event-recurrence-scope').value = 'single';
+  scopeGroup.style.display = isRecurring ? 'flex' : 'none';
+  if (isRecurring && recurScope) {
+    document.getElementById('event-recurrence-scope').value = recurScope;
+  } else {
+    document.getElementById('event-recurrence-scope').value = 'single';
+  }
 
   const now = new Date();
   if (event) {
@@ -1707,7 +2057,7 @@ function openEventModal(event) {
     if (!event.start?.dateTime && event.end?.date) {
       const d = new Date(event.end.date + 'T00:00:00');
       d.setDate(d.getDate() - 1);
-      endRaw = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + 'T00:00:00';
+      endRaw = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}T00:00:00`;
     }
     document.getElementById('event-start').value = startRaw?.slice(0,16) || now.toISOString().slice(0,16);
     document.getElementById('event-end').value   = endRaw?.slice(0,16)   || new Date(now.getTime()+3600000).toISOString().slice(0,16);
@@ -1846,35 +2196,70 @@ async function deleteEvent() {
 // ===== CONTACTS =====
 async function loadContacts(loadMore = false) {
   const container = document.getElementById('contacts-list');
-  if (!loadMore) { 
-    container.innerHTML = ''; 
-    State.contacts.pageToken = null; 
-    loadingState(container); 
+  if (!loadMore) {
+    container.innerHTML = '';
+    State.contacts.pageToken = null;
+    State.contacts.allItems  = [];   // full unfiltered set for searching
+    loadingState(container);
     document.getElementById('contact-detail-panel').classList.remove('open');
     document.getElementById('contact-viewer').style.display = 'none';
     document.getElementById('contact-detail-empty').style.display = 'flex';
+
+    // Load ALL pages up-front (capped at 500) so the filter always searches
+    // the full list, not just the first batch.
+    try {
+      let pageToken = null;
+      let totalLoaded = 0;
+      do {
+        const pageParam = pageToken ? `&pageToken=${pageToken}` : '';
+        const data = await gapi('GET',
+          `https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations,birthdays,biographies&pageSize=100${pageParam}`
+        );
+        const batch = data.connections || [];
+        State.contacts.allItems  = [...(State.contacts.allItems  || []), ...batch];
+        State.contacts.items     = State.contacts.allItems;
+        pageToken = data.nextPageToken || null;
+        totalLoaded += batch.length;
+      } while (pageToken && totalLoaded < 500);
+
+      State.contacts.pageToken = pageToken; // leftover for "Load More" if > 500
+      renderContactsList(State.contacts.items, true);
+      document.getElementById('btn-load-more-contacts').style.display =
+        State.contacts.pageToken ? 'block' : 'none';
+    } catch (err) { toast('Error loading contacts', 'error'); }
+    return;
   }
-  
+
+  // "Load More" beyond the initial 500
   try {
-    const pageParam = loadMore && State.contacts.pageToken ? `&pageToken=${State.contacts.pageToken}` : '';
-    const data = await gapi('GET', `https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations,birthdays,biographies&pageSize=100${pageParam}`);
-    
+    const pageParam = State.contacts.pageToken ? `&pageToken=${State.contacts.pageToken}` : '';
+    const data = await gapi('GET',
+      `https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations,birthdays,biographies&pageSize=100${pageParam}`
+    );
     State.contacts.pageToken = data.nextPageToken || null;
-    if(!loadMore) State.contacts.items =[];
-    
-    const items = data.connections ||[];
-    State.contacts.items = [...State.contacts.items, ...items];
-    
-    renderContactsList(State.contacts.items, !loadMore);
-    document.getElementById('btn-load-more-contacts').style.display = State.contacts.pageToken ? 'block' : 'none';
-  } catch(err) { toast('Error loading contacts', 'error'); }
+    const items = data.connections || [];
+    State.contacts.allItems = [...(State.contacts.allItems || []), ...items];
+    State.contacts.items    = State.contacts.allItems;
+    renderContactsList(State.contacts.items, false);
+    document.getElementById('btn-load-more-contacts').style.display =
+      State.contacts.pageToken ? 'block' : 'none';
+  } catch (err) { toast('Error loading contacts', 'error'); }
 }
 
 function filterContacts(q) {
-  const f = State.contacts.items.filter(c => {
-    const name = c.names?.[0]?.displayName || '';
+  // Always filter the full allItems set, not just what's currently rendered
+  const source = State.contacts.allItems || State.contacts.items || [];
+  if (!q.trim()) return renderContactsList(source, true);
+  const lq = q.toLowerCase();
+  const f = source.filter(c => {
+    const name  = c.names?.[0]?.displayName || '';
     const email = c.emailAddresses?.[0]?.value || '';
-    return name.toLowerCase().includes(q.toLowerCase()) || email.toLowerCase().includes(q.toLowerCase());
+    const phone = c.phoneNumbers?.[0]?.value || '';
+    const org   = c.organizations?.[0]?.name || '';
+    return name.toLowerCase().includes(lq)  ||
+           email.toLowerCase().includes(lq) ||
+           phone.toLowerCase().includes(lq) ||
+           org.toLowerCase().includes(lq);
   });
   renderContactsList(f, true);
 }
