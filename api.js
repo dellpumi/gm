@@ -14,12 +14,16 @@ export const State = {
   currentPanel: 'mail',
   allContacts: [],
   mail: { label: 'INBOX', items: [], pageToken: null, isFetching: false },
-  contacts: { items: [], pageToken: null },
-  calendar: { date: new Date(), events: [], calendars: [], editingCalendarId: null },
+  contacts: { items: [], allItems: [], pageToken: null },           // allItems = full unfiltered set for search
+  calendar: {
+    date: new Date(), events: [], calendars: [],
+    editingCalendarId: null, editingEventId: null, editingEvent: null
+  },
   compose: { attachments: [], currentEmailId: null, currentThreadId: null },
   reply: { attachments: [], originalHtml: '', originalFrom: '', originalDate: '' },
   _sessionWakeListeners: null,   // set by startSessionTimer in app.js
   _sessionExpiredToastShown: false,
+  _warned30min: false,           // prevents the 30-min warning from firing more than once
   pollInterval: null             // 5-minute inbox poll timer
 };
 
@@ -122,6 +126,7 @@ export const Auth = {
     localStorage.removeItem('aether_pkce_state');
     localStorage.removeItem('aether_login_time');
     localStorage.removeItem('aether_time_offset');
+    localStorage.removeItem('aether_oauth_redirect'); // safety: never leave this stranded
   },
 
   // ── check: returns true if a still-valid access token exists in this session ──
@@ -144,6 +149,11 @@ export const Auth = {
 
   // ── parseCode: exchange ?code= for tokens, then anchor the session wall-clock ──
   parseCode: async () => {
+    // Remove the OAuth redirect flag first — the DOMContentLoaded startup check
+    // reads this key to decide whether to call clearAll(). Removing it here keeps
+    // state clean even if the exchange fails.
+    localStorage.removeItem('aether_oauth_redirect');
+
     const params   = new URLSearchParams(window.location.search);
     const code     = params.get('code');
     const retState = params.get('state');
@@ -295,6 +305,12 @@ export const Auth = {
       access_type:           'offline',
       prompt:                'consent',
     });
+    // CRITICAL: set this flag BEFORE changing location.
+    // Setting window.location.href fires pagehide/beforeunload immediately.
+    // handlePageClose reads this flag to know it must NOT call clearAll()
+    // (which would delete the PKCE verifier + state we just stored above).
+    localStorage.setItem('aether_oauth_redirect', '1');
+
     window.location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + params;
     return true;
   }

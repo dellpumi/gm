@@ -265,10 +265,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   const CLOSE_TS_KEY = 'aether_close_ts';
   const RELOAD_FLAG  = 'aether_is_reload';
 
-  const closeTs  = parseInt(localStorage.getItem(CLOSE_TS_KEY) || '0', 10);
-  const wasReload = sessionStorage.getItem(RELOAD_FLAG) === '1';
-  if (closeTs && !wasReload) {
-    // Real close detected → wipe everything for security
+  const closeTs          = parseInt(localStorage.getItem(CLOSE_TS_KEY) || '0', 10);
+  const wasReload        = sessionStorage.getItem(RELOAD_FLAG) === '1';
+  const wasOAuthRedirect = localStorage.getItem('aether_oauth_redirect') === '1';
+
+  if (closeTs && !wasReload && !wasOAuthRedirect) {
+    // Real close (not a reload, not a Google OAuth redirect) → wipe for security
     Auth.clearAll();
     State.token = null;
   }
@@ -281,12 +283,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   function handlePageClose() {
-    const isReload = sessionStorage.getItem(RELOAD_FLAG) === '1';
+    const isReload        = sessionStorage.getItem(RELOAD_FLAG) === '1';
+    const isOAuthRedirect = localStorage.getItem('aether_oauth_redirect') === '1';
     localStorage.setItem(CLOSE_TS_KEY, String(Date.now()));
-    if (isReload) {
-      Auth.clear(); // reload: keep refresh token for silent re-auth
+
+    if (isReload || isOAuthRedirect) {
+      // Reload or OAuth redirect: keep the refresh token alive.
+      // For OAuth specifically: clearAll() would delete aether_pkce_verifier
+      // and aether_pkce_state, which were just stored moments ago — causing the
+      // state-mismatch error when Google redirects back.
+      Auth.clear();
     } else {
-      Auth.clearAll(); // real close: wipe everything for security
+      // Real tab/window close: wipe everything for security.
+      Auth.clearAll();
     }
     State.token = null;
   }
@@ -322,18 +331,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  function showLoginError(msg) {
-    document.getElementById('login-screen').style.display = 'flex';
-    document.getElementById('app').style.display = 'none';
-    let errEl = document.getElementById('login-error-msg');
-    if (!errEl) {
-      errEl = document.createElement('p');
-      errEl.id = 'login-error-msg';
-      errEl.style.cssText = 'color:var(--red,#f87171);font-size:13px;margin-top:14px;text-align:center;';
-      document.querySelector('.login-card').appendChild(errEl);
-    }
-    errEl.textContent = msg;
-  }
+  function showLoginError(msg) { _showLoginError(msg); } // thin alias — module-level _showLoginError does the work
 
   // PKCE: ?code= returned from Google
   const urlParams = new URLSearchParams(window.location.search);
@@ -380,18 +378,32 @@ function setupEventListeners() {
   });
 
   // ── Single-screen login ────────────────────────────────────────────────────
-  // Pre-fill inputs from saved localStorage values so returning users don't need
-  // to retype their credentials every time.
+  // showLoginError is defined at module top level (below) so it is reachable
+  // from both this click handler AND from the DOMContentLoaded boot section.
   const savedClientId     = Auth.getClientId();
   const savedClientSecret = Auth.getClientSecret();
   const cidInput = document.getElementById('client-id-input');
   const secInput = document.getElementById('client-secret-input');
-  if (savedClientId     && cidInput) cidInput.value = savedClientId;
-  if (savedClientSecret && secInput) secInput.value = savedClientSecret;
+
+  // Show short masked previews ("1009···" / "GOCS···") so credentials aren't
+  // displayed in full on screen, while still letting the user know they're loaded.
+  const CID_MASK = savedClientId     ? savedClientId.slice(0, 4)     + '···' : '';
+  const SEC_MASK = savedClientSecret ? savedClientSecret.slice(0, 4) + '···' : '';
+  if (CID_MASK && cidInput) cidInput.value = CID_MASK;
+  if (SEC_MASK && secInput) secInput.value = SEC_MASK;
+
+  // Clear mask on focus (user wants to type a new value), restore on blur if left empty.
+  cidInput?.addEventListener('focus', () => { if (cidInput.value === CID_MASK) cidInput.value = ''; });
+  secInput?.addEventListener('focus', () => { if (secInput.value === SEC_MASK) secInput.value = ''; });
+  cidInput?.addEventListener('blur',  () => { if (!cidInput.value.trim() && CID_MASK) cidInput.value = CID_MASK; });
+  secInput?.addEventListener('blur',  () => { if (!secInput.value.trim() && SEC_MASK) secInput.value = SEC_MASK; });
 
   document.getElementById('btn-login').addEventListener('click', async () => {
-    const cid = cidInput?.value.trim() || '';
-    const sec = secInput?.value.trim() || '';
+    const rawCid = cidInput?.value.trim() || '';
+    const rawSec = secInput?.value.trim() || '';
+    // If the field still shows the mask, the user did not change it → use stored value.
+    const cid = (rawCid === CID_MASK) ? savedClientId : rawCid;
+    const sec = (rawSec === SEC_MASK) ? savedClientSecret : rawSec;
     if (!cid) {
       showLoginError('Please enter your OAuth Client ID.');
       return;
@@ -642,9 +654,30 @@ function attachAutocomplete(input) {
   input.addEventListener('blur', () => popup.style.display = 'none');
 }
 
+// showLoginError — top-level so it is reachable from setupEventListeners
+// click handlers AND from the DOMContentLoaded boot section (which wraps it
+// in a thin local alias). Defining it here avoids the ReferenceError that
+// would occur if it were defined only inside the DOMContentLoaded callback.
+function showLoginError(msg) {
+  _showLoginError(msg);
+}
+function _showLoginError(msg) {
+  document.getElementById('login-screen').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+  let errEl = document.getElementById('login-error-msg');
+  if (!errEl) {
+    errEl = document.createElement('p');
+    errEl.id = 'login-error-msg';
+    errEl.style.cssText = 'color:var(--red,#f87171);font-size:13px;margin-top:14px;text-align:center;';
+    document.querySelector('.login-card').appendChild(errEl);
+  }
+  errEl.textContent = msg;
+}
+
 function startSessionTimer() {
   clearInterval(State.timerInterval);
   State._sessionExpiredToastShown = false;
+  State._warned30min = false; // reset so the warning fires fresh on each new session
 
   // ── Session expiry check (shared by timer tick and wake-from-sleep) ───────
   function checkExpiry() {
@@ -747,11 +780,10 @@ function startSessionTimer() {
                                        totalRemainMs < 1800000 ? 'var(--yellow)' : '';
 
     // ── One-time warning toast at 30 minutes total remaining ─────────────────
-    if (totalRemainMs > 0 && totalRemainMs < 1800000 && !State._sessionExpiredToastShown) {
+    if (totalRemainMs > 0 && totalRemainMs <= 1800000 && !State._warned30min) {
+      State._warned30min = true;
       const minsLeft = Math.ceil(totalRemainMs / 60000);
-      if (totalRemainMs < 1802000 && totalRemainMs > 1798000) { // fire once around 30 min mark
-        toast(`⚠ ${minsLeft} minutes of your 9-hour session remain.`, 'error');
-      }
+      toast(`⚠ ${minsLeft} minutes of your 9-hour session remain.`, 'error');
     }
   }, 1000);
 }
