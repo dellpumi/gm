@@ -292,20 +292,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   function handlePageClose() {
-    const isReload        = sessionStorage.getItem(RELOAD_FLAG) === '1';
-    const isOAuthRedirect = localStorage.getItem('aether_oauth_redirect') === '1';
+    // Always record a close timestamp so the next page load can detect it.
     localStorage.setItem(CLOSE_TS_KEY, String(Date.now()));
-
-    if (isReload || isOAuthRedirect) {
-      // Reload or OAuth redirect: keep the refresh token alive.
-      // For OAuth specifically: clearAll() would delete aether_pkce_verifier
-      // and aether_pkce_state, which were just stored moments ago — causing the
-      // state-mismatch error when Google redirects back.
-      Auth.clear();
-    } else {
-      // Real tab/window close: wipe everything for security.
-      Auth.clearAll();
-    }
+    // Always use lightweight clear here — it only wipes the session-scoped access token
+    // from sessionStorage (which the browser discards on tab close anyway).
+    // The page LOAD handler uses the Performance Navigation API to determine whether
+    // this was a reload or a genuine close, and only then calls Auth.clearAll() to
+    // wipe the persistent refresh token.  Doing clearAll() here breaks reload-button
+    // and Ctrl+Shift+R because they don't fire a keydown we can intercept.
+    Auth.clear();
     State.token = null;
   }
   window.addEventListener('pagehide',     handlePageClose);
@@ -330,7 +325,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       await loadUserInfo();
       await loadEmails('INBOX');
       loadAllContactsForAutocomplete();
-      startInboxPoll(); // #9 — begin 5-minute background poll
+      startInboxPoll(); // begin 10-minute background poll
     } catch (err) {
       if (err.message === 'SESSION_EXPIRED' || err.message === 'Session expired') {
         handleSignOut();
@@ -922,10 +917,9 @@ async function loadEmails(label, loadMore = false) {
   State.mail.isFetching = false;
 }
 
-// #9 — Silent background poll: checks for new messages every 5 minutes.
+// Silent background poll: checks for new messages every 10 minutes.
 // If new ones are found they are prepended to the list without disturbing
-// whatever the user has open. Works only when the mail panel shows INBOX
-// (or any label-based view — not search results).
+// whatever the user has open.
 async function pollInbox() {
   // Only poll when actually looking at mail, not calendar/contacts/search
   if (State.currentPanel !== 'mail') return;
@@ -1339,13 +1333,14 @@ async function renderEmail(msg) {
       }
       
       chip.append(thumbArea, infoArea);
-      // Open a preview modal for PDF / DOCX / XLSX; download everything else
-      const previewExts = ['pdf', 'docx', 'doc', 'xlsx', 'xls'];
+      // Open a preview modal for PDF / DOCX / XLSX; download everything else.
+      // Note: legacy .doc (application/msword) is NOT previewable — mammoth.js
+      // only understands the modern .docx (Office Open XML) format.
+      const previewExts = ['pdf', 'docx', 'xlsx', 'xls'];
       const ext = (a.filename.split('.').pop() || '').toLowerCase();
       const isPreviewable = previewExts.includes(ext) ||
         ['application/pdf',
          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-         'application/msword',
          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
          'application/vnd.ms-excel'].includes(a.mime);
       chip.onclick = () => isPreviewable
