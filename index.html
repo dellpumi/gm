@@ -14,7 +14,7 @@
   <div class="login-card">
     <div class="login-logo">✉️</div>
     <div class="login-title">Aether</div>
-    <div class="login-sub">GBG's all-in-one Gmail client &nbsp;·&nbsp; v3.6 · 2026.05.29</div>
+    <div class="login-sub">GBG's all-in-one Gmail client &nbsp;·&nbsp; v3.7 · 2026.06.04</div>
 
     <div class="login-fields">
       <div class="login-field">
@@ -46,7 +46,7 @@
     <div class="sidebar-section">
       <div class="sidebar-label">Mail</div>
       <div class="nav-item active" data-panel="mail" data-label="INBOX" id="nav-inbox"><span>📥</span> Inbox <span class="badge" id="unread-badge" style="display:none">0</span></div>
-      <div class="nav-item" data-panel="mail" data-label="SENT"><span>📤</span> Sent</div>
+      <div class="nav-item" data-panel="mail" data-label="SENT"><span>📤</span> Sent/Forwarded</div>
       <div class="nav-item" data-panel="mail" data-label="STARRED"><span>⭐</span> Starred</div>
       <div class="nav-item" data-panel="mail" data-label="DRAFT"><span>📝</span> Drafts</div>
       <div class="nav-item" data-panel="mail" data-label="SPAM"><span>🚫</span> Spam</div>
@@ -86,7 +86,7 @@
       </div>
       <div class="topbar-actions">
         <div id="session-timer">
-          <span class="timer-version">v3.6 · 2026.05.29</span>
+          <span class="timer-version">v3.7 · 2026.06.04</span>
           <span class="timer-sep">|</span>
           <span class="timer-icon">⏱</span>
           <span id="timer-slot"     class="timer-slot">--:--</span>
@@ -115,7 +115,7 @@
             <div class="reply-toggle" id="btn-toggle-reply"><span id="reply-arrow">▶</span> Reply</div>
             <div class="reply-editor" id="reply-editor">
               <div class="compose-field"><label>To</label><input type="text" id="reply-to" class="autocomplete-input"></div>
-              <div class="compose-field"><label>Subj</label><input type="text" id="reply-subject"></div>
+              <div class="compose-field"><label>Subject</label><input type="text" id="reply-subject"></div>
               <div id="reply-body" class="rich-editor" contenteditable="true" placeholder="Write your reply... (Drag &amp; Drop images here)"></div>
               <div class="attached-files" id="reply-attached-files-list"></div>
               <div class="reply-editor-footer">
@@ -169,7 +169,7 @@
     <div class="compose-title-bar"><span id="compose-title">New Message</span> <button id="btn-close-compose">✕</button></div>
     <div class="compose-field"><label>To</label><input type="text" id="compose-to" class="autocomplete-input" placeholder="Recipients"></div>
     <div class="compose-field"><label>Cc</label><input type="text" id="compose-cc" class="autocomplete-input"></div>
-    <div class="compose-field"><label>Subj</label><input type="text" id="compose-subject" placeholder="Subject"></div>
+    <div class="compose-field"><label>Subject</label><input type="text" id="compose-subject" placeholder="Subject"></div>
     <div class="compose-body"><div id="compose-body-text" class="rich-editor" contenteditable="true" placeholder="Write your message... (Drag &amp; Drop images here)"></div></div>
     <div class="attached-files" id="attached-files-list"></div>
     <div class="compose-footer">
@@ -266,6 +266,20 @@
       <button class="btn-cancel" id="btn-confirm-no">Cancel</button>
       <button class="btn-save" id="btn-confirm-yes" style="background: var(--accent);">Yes, Proceed</button>
     </div>
+  </div>
+</div>
+
+<!-- File preview modal: PDF, DOCX, XLSX — with X close and Download button -->
+<div id="file-preview-modal" class="modal-overlay" style="z-index:350;">
+  <div class="file-preview-window">
+    <div class="file-preview-header">
+      <span id="file-preview-title">Preview</span>
+      <div style="display:flex;gap:8px;align-items:center;margin-left:auto;">
+        <button class="action-btn" id="file-preview-download">⬇ Download</button>
+        <button class="file-preview-close-btn" id="file-preview-close" title="Close">✕</button>
+      </div>
+    </div>
+    <div id="file-preview-body" class="file-preview-body"></div>
   </div>
 </div>
 

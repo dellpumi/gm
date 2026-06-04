@@ -258,15 +258,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupEventListeners();
 
   // ── Tab-close / reload detection ─────────────────────────────────────────
-  // On a REAL close (tab closed, window closed, browser quit):  clearAll() — wipes
-  //   refresh token + login timestamp so an unauthorised person can't resume the session.
-  // On a RELOAD (F5, Ctrl+R): only clear() — keeps refresh token so the page can
-  //   silently re-authenticate without forcing the user back to the login screen.
+  // PRIMARY: Performance Navigation API — detects ALL reload methods (F5, Ctrl+R,
+  //   Ctrl+Shift+R, browser reload button) regardless of whether the page had focus.
+  //   navType === 'reload'        → F5 / Ctrl+R / Ctrl+Shift+R / reload button
+  //   navType === 'back_forward'  → restored from browser history (treat like reload)
+  //   navType === 'navigate'      → regular visit or tab-close + reopen
+  const navType = performance.getEntriesByType?.('navigation')?.[0]?.type ?? 'navigate';
+  const wasReloadByBrowser = (navType === 'reload' || navType === 'back_forward');
+
   const CLOSE_TS_KEY = 'aether_close_ts';
   const RELOAD_FLAG  = 'aether_is_reload';
 
   const closeTs          = parseInt(localStorage.getItem(CLOSE_TS_KEY) || '0', 10);
-  const wasReload        = sessionStorage.getItem(RELOAD_FLAG) === '1';
+  // Combine Performance API (primary) with sessionStorage flag (belt-and-suspenders)
+  const wasReload        = wasReloadByBrowser || sessionStorage.getItem(RELOAD_FLAG) === '1';
   const wasOAuthRedirect = localStorage.getItem('aether_oauth_redirect') === '1';
 
   if (closeTs && !wasReload && !wasOAuthRedirect) {
@@ -277,8 +282,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   sessionStorage.removeItem(RELOAD_FLAG);
   localStorage.removeItem(CLOSE_TS_KEY);
 
+  // Belt-and-suspenders keydown listener — catches keyboard reloads for future navigations.
+  // Also handles Ctrl+Shift+R (hard reload in Chrome) where e.key is uppercase 'R'.
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'F5' || (e.ctrlKey && e.key === 'r') || (e.metaKey && e.key === 'r'))
+    if (e.key === 'F5' ||
+        (e.ctrlKey  && (e.key === 'r' || e.key === 'R')) ||
+        (e.metaKey  && (e.key === 'r' || e.key === 'R')))
       sessionStorage.setItem(RELOAD_FLAG, '1');
   });
 
@@ -465,14 +474,29 @@ function setupEventListeners() {
 
   document.getElementById('btn-confirm-no').addEventListener('click', () => document.getElementById('confirm-modal').classList.remove('open'));
 
+  // File preview modal close
+  function closeFilePreview() {
+    const modal = document.getElementById('file-preview-modal');
+    modal.classList.remove('open');
+    if (modal._blobUrl) { URL.revokeObjectURL(modal._blobUrl); modal._blobUrl = null; }
+    document.getElementById('file-preview-body').innerHTML = '';
+  }
+  document.getElementById('file-preview-close').addEventListener('click', closeFilePreview);
+  // Click outside the preview window also closes it
+  document.getElementById('file-preview-modal').addEventListener('click', (e) => {
+    if (e.target === document.getElementById('file-preview-modal')) closeFilePreview();
+  });
+
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      const filePreview = document.getElementById('file-preview-modal');
       const confirm = document.getElementById('confirm-modal');
       const contact = document.getElementById('contact-modal');
       const evModal = document.getElementById('event-modal');
       const compose = document.getElementById('compose-modal');
 
-      if (confirm.classList.contains('open')) confirm.classList.remove('open');
+      if (filePreview.classList.contains('open')) closeFilePreview();
+      else if (confirm.classList.contains('open')) confirm.classList.remove('open');
       else if (contact.classList.contains('open')) contact.classList.remove('open');
       else if (evModal.classList.contains('open')) evModal.classList.remove('open');
       else if (compose.classList.contains('open')) compose.classList.remove('open');
@@ -830,6 +854,19 @@ function showPanel(panel, label) {
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('search-input').value = '';
 
+  // Update the list-pane header to match the selected folder
+  const LABEL_NAMES = {
+    'INBOX': 'Inbox', 'SENT': 'Sent/Forwarded', 'STARRED': 'Starred',
+    'DRAFT': 'Drafts', 'SPAM': 'Spam', 'TRASH': 'Trash',
+    'CATEGORY_PROMOTIONS': 'Promotions', 'CATEGORY_SOCIAL': 'Social',
+    'CATEGORY_UPDATES': 'Updates', 'CATEGORY_FORUMS': 'Forums'
+  };
+  const listLabelEl = document.getElementById('list-label');
+  if (listLabelEl) {
+    listLabelEl.textContent = label ? (LABEL_NAMES[label] || label)
+                                    : { mail: 'Inbox', calendar: 'Calendar', contacts: 'Contacts' }[panel] || panel;
+  }
+
   if (panel === 'mail') loadEmails(label || 'INBOX');
   if (panel === 'calendar') loadCalendar();
   if (panel === 'contacts') loadContacts();
@@ -914,10 +951,15 @@ async function pollInbox() {
       gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`)
     ));
 
+    // ── New-arrival housekeeping ────────────────────────────────────────────────
+    // New emails are found: strip the green highlight from the PREVIOUS batch so only
+    // the freshest arrivals stay green. If this poll finds nothing, existing green rows
+    // are left untouched (they stay green until the next poll that does find new mail).
+    const container = document.getElementById('email-list');
+    container.querySelectorAll('.new-arrival').forEach(row => row.classList.remove('new-arrival'));
+
     // Prepend to state and DOM without touching the open email detail
     State.mail.items = [...freshMsgs, ...State.mail.items];
-
-    const container = document.getElementById('email-list');
     // Insert new rows at the top, preserving the existing DOM rows below
     const tempFrag = document.createDocumentFragment();
     freshMsgs.forEach(m => {
@@ -925,6 +967,8 @@ async function pollInbox() {
       (m.payload?.headers || []).forEach(h => headers[h.name] = h.value);
       const isUnread  = m.labelIds?.includes('UNREAD');
       const isStarred = m.labelIds?.includes('STARRED');
+      const hasAttachment = (m.payload?.parts || []).some(p => p.filename && p.filename.length > 0)
+                         || (m.payload?.mimeType || '').includes('mixed');
       const fromStr   = decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(headers['From'] || 'Unknown')));
       const ts        = formatTimestamp(headers['Date']);
 
@@ -941,7 +985,9 @@ async function pollInbox() {
       const displayUser = label === 'SENT'
         ? 'To: ' + (decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(headers['To'] || ''))).split(',')[0].trim())
         : fromStr.replace(/<[^>]*>/, '').trim() || fromStr;
-      metaObj.append(el('span', 'email-from', displayUser), el('span', 'email-date', ts));
+      const fromSpan = el('span', 'email-from', displayUser);
+      if (hasAttachment) fromSpan.appendChild(el('span', 'email-att-icon', '📎'));
+      metaObj.append(fromSpan, el('span', 'email-date', ts));
 
       const subj = decodeEntities(decodeRFC2047(headers['Subject']) || '(no subject)');
       const snip = decodeEntities(decodeRFC2047(m.snippet) || '');
@@ -955,10 +1001,7 @@ async function pollInbox() {
     if (firstChild) container.insertBefore(tempFrag, firstChild);
     else            container.appendChild(tempFrag);
 
-    // Brief fade-in highlight so the user notices the new arrivals
-    container.querySelectorAll('.new-arrival').forEach(row => {
-      setTimeout(() => row.classList.remove('new-arrival'), 2500);
-    });
+    // Green highlight stays until the NEXT poll that delivers new mail (no auto-remove).
 
     // Subtle toast — don't interrupt with a loud alert
     const count = freshMsgs.length;
@@ -975,7 +1018,7 @@ async function pollInbox() {
 
 function startInboxPoll() {
   stopInboxPoll();
-  State.pollInterval = setInterval(pollInbox, 5 * 60 * 1000); // every 5 minutes
+  State.pollInterval = setInterval(pollInbox, 10 * 60 * 1000); // every 10 minutes
 }
 
 function stopInboxPoll() {
@@ -1036,6 +1079,10 @@ function renderEmailList(msgs, clearFirst) {
     const ts = formatTimestamp(headers['Date']);
 
     const isStarred = m.labelIds && m.labelIds.includes('STARRED');
+    // Detect attachments: payload.parts with filenames (available in metadata format)
+    // Falls back to mimeType heuristic if parts aren't present.
+    const hasAttachment = (m.payload?.parts || []).some(p => p.filename && p.filename.length > 0)
+                       || (m.payload?.mimeType || '').includes('mixed');
     const div = el('div', `email-item ${isUnread ? 'unread' : ''} ${isStarred ? 'starred' : ''}`);
     div.dataset.msgId = m.id;
 
@@ -1052,7 +1099,9 @@ function renderEmailList(msgs, clearFirst) {
     div.appendChild(cb);
 
     const metaObj = el('div', 'email-meta');
-    metaObj.append(el('span', 'email-from', displayUser), el('span', 'email-date', ts));
+    const fromSpan = el('span', 'email-from', displayUser);
+    if (hasAttachment) fromSpan.appendChild(el('span', 'email-att-icon', '📎'));
+    metaObj.append(fromSpan, el('span', 'email-date', ts));
     
     const subj = decodeEntities(decodeRFC2047(headers['Subject']) || '(no subject)');
     const snip = decodeEntities(decodeRFC2047(m.snippet) || '');
@@ -1290,7 +1339,18 @@ async function renderEmail(msg) {
       }
       
       chip.append(thumbArea, infoArea);
-      chip.onclick = () => downloadAttachment(msg.id, a.attachmentId, a.filename, a.data, a.mime);
+      // Open a preview modal for PDF / DOCX / XLSX; download everything else
+      const previewExts = ['pdf', 'docx', 'doc', 'xlsx', 'xls'];
+      const ext = (a.filename.split('.').pop() || '').toLowerCase();
+      const isPreviewable = previewExts.includes(ext) ||
+        ['application/pdf',
+         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+         'application/msword',
+         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+         'application/vnd.ms-excel'].includes(a.mime);
+      chip.onclick = () => isPreviewable
+        ? previewAttachment(msg.id, a.attachmentId, a.filename, a.mime, a.data)
+        : downloadAttachment(msg.id, a.attachmentId, a.filename, a.data, a.mime);
       chips.appendChild(chip);
     });
     
@@ -1613,6 +1673,80 @@ async function downloadAttachment(msgId, attId, filename, inlineData, mimeType) 
   } catch(e) { 
     toast('Error downloading attachment', 'error'); 
     console.error("Attachment Download Error:", e);
+  }
+}
+
+// ── File preview modal: PDF (iframe), DOCX (mammoth.js), XLSX (SheetJS) ──────
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed to load: ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
+  const modal   = document.getElementById('file-preview-modal');
+  const bodyEl  = document.getElementById('file-preview-body');
+  const titleEl = document.getElementById('file-preview-title');
+
+  titleEl.textContent = filename;
+  bodyEl.innerHTML = '<div class="loading-spinner" style="background:var(--bg);flex:1;"><div class="spinner"></div> Loading preview…</div>';
+  modal.classList.add('open');
+
+  // Wire Download button each time so it captures the current file
+  document.getElementById('file-preview-download').onclick = () =>
+    downloadAttachment(msgId, attId, filename, inlineData, mimeType);
+
+  try {
+    // Fetch raw bytes
+    let b64str = '';
+    if (inlineData) {
+      b64str = padB64(inlineData);
+    } else {
+      const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msgId}/attachments/${attId}`);
+      b64str = padB64(data.data);
+    }
+    const byteStr = atob(b64str);
+    const bytes   = new Uint8Array(byteStr.length);
+    for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+
+    const ext = (filename.split('.').pop() || '').toLowerCase();
+
+    if (mimeType === 'application/pdf' || ext === 'pdf') {
+      // PDF — native browser renderer via blob URL in an iframe
+      const blob = new Blob([bytes], { type: 'application/pdf' });
+      const url  = URL.createObjectURL(blob);
+      if (modal._blobUrl) URL.revokeObjectURL(modal._blobUrl);
+      modal._blobUrl = url;
+      bodyEl.innerHTML = `<iframe src="${url}#view=FitH" style="width:100%;height:100%;border:none;flex:1;"></iframe>`;
+
+    } else if (ext === 'docx' || mimeType.includes('wordprocessingml')) {
+      // DOCX — mammoth.js converts to HTML
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js');
+      const result = await mammoth.convertToHtml({ arrayBuffer: bytes.buffer });
+      bodyEl.innerHTML = `<div class="file-preview-content docx-content">${result.value}</div>`;
+
+    } else if (ext === 'xlsx' || ext === 'xls' ||
+               mimeType.includes('spreadsheetml') || mimeType.includes('ms-excel')) {
+      // XLSX / XLS — SheetJS renders first sheet as HTML table
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+      const wb   = XLSX.read(bytes, { type: 'array' });
+      const ws   = wb.Sheets[wb.SheetNames[0]];
+      const html = XLSX.utils.sheet_to_html(ws);
+      bodyEl.innerHTML = `<div class="file-preview-content xlsx-content">${html}</div>`;
+
+    } else {
+      bodyEl.innerHTML = `<div class="file-preview-unsupported">
+        Preview is not available for <strong>${escHtml(filename)}</strong>.<br>
+        Use the Download button to open it in the appropriate application.
+      </div>`;
+    }
+  } catch (e) {
+    bodyEl.innerHTML = `<div class="file-preview-unsupported">Failed to load preview.<br><small>${escHtml(e.message)}</small></div>`;
   }
 }
 
