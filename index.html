@@ -14,7 +14,7 @@
   <div class="login-card">
     <div class="login-logo">✉️</div>
     <div class="login-title">Aether</div>
-    <div class="login-sub">GBG's all-in-one Gmail client &nbsp;·&nbsp; v3.7 · 2026.06.04</div>
+    <div class="login-sub">GBG's all-in-one Gmail client &nbsp;·&nbsp; v3.8 · 2026.06.09</div>
 
     <div class="login-fields">
       <div class="login-field">
@@ -86,7 +86,7 @@
       </div>
       <div class="topbar-actions">
         <div id="session-timer">
-          <span class="timer-version">v3.7 · 2026.06.04</span>
+          <span class="timer-version">v3.8 · 2026.06.09</span>
           <span class="timer-sep">|</span>
           <span class="timer-icon">⏱</span>
           <span id="timer-slot"     class="timer-slot">--:--</span>
@@ -115,6 +115,8 @@
             <div class="reply-toggle" id="btn-toggle-reply"><span id="reply-arrow">▶</span> Reply</div>
             <div class="reply-editor" id="reply-editor">
               <div class="compose-field"><label>To</label><input type="text" id="reply-to" class="autocomplete-input"></div>
+              <div class="compose-field"><label>Cc</label><input type="text" id="reply-cc" class="autocomplete-input" placeholder="Carbon copy"></div>
+              <div class="compose-field"><label>Bcc</label><input type="text" id="reply-bcc" class="autocomplete-input" placeholder="Blind carbon copy"></div>
               <div class="compose-field"><label>Subject</label><input type="text" id="reply-subject"></div>
               <div id="reply-body" class="rich-editor" contenteditable="true" placeholder="Write your reply... (Drag &amp; Drop images here)"></div>
               <div class="attached-files" id="reply-attached-files-list"></div>
@@ -168,7 +170,8 @@
   <div class="compose-window">
     <div class="compose-title-bar"><span id="compose-title">New Message</span> <button id="btn-close-compose">✕</button></div>
     <div class="compose-field"><label>To</label><input type="text" id="compose-to" class="autocomplete-input" placeholder="Recipients"></div>
-    <div class="compose-field"><label>Cc</label><input type="text" id="compose-cc" class="autocomplete-input"></div>
+    <div class="compose-field"><label>Cc</label><input type="text" id="compose-cc" class="autocomplete-input" placeholder="Carbon copy"></div>
+    <div class="compose-field"><label>Bcc</label><input type="text" id="compose-bcc" class="autocomplete-input" placeholder="Blind carbon copy"></div>
     <div class="compose-field"><label>Subject</label><input type="text" id="compose-subject" placeholder="Subject"></div>
     <div class="compose-body"><div id="compose-body-text" class="rich-editor" contenteditable="true" placeholder="Write your message... (Drag &amp; Drop images here)"></div></div>
     <div class="attached-files" id="attached-files-list"></div>

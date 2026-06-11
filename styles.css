@@ -95,8 +95,12 @@ button { outline: none; font-family: var(--font); }
 .email-item.starred  { background: rgba(251,191,36,0.07); border-left: 2px solid var(--yellow,#fbbf24); }
 /* New mail arrival — persistent light green until the next poll that finds new emails */
 .email-item.new-arrival { background: rgba(52,211,153,0.09); border-left: 2px solid var(--green); }
-/* Attachment indicator shown inline with sender name */
-.email-att-icon { color: var(--green); font-size: 11px; margin-left: 5px; flex-shrink: 0; }
+/* Attachment indicator — SVG icon inline with sender name, respects currentColor */
+.email-att-icon {
+  display: inline-flex; align-items: center;
+  color: var(--green); margin-left: 6px;
+  vertical-align: middle; flex-shrink: 0; opacity: 0.9;
+}
 .email-checkbox { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); z-index: 2; }
 .email-from { font-size: 13px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .email-subject { font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
@@ -322,6 +326,18 @@ button { outline: none; font-family: var(--font); }
   flex: 1; color: var(--text3); font-size: 14px; text-align: center;
   padding: 40px; line-height: 1.8; background: var(--bg);
 }
+/* Plain text */
+.txt-content { font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-all; line-height: 1.6; color: #1a1a1a; }
+/* XLSX multi-sheet tabs */
+.xlsx-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 10px 16px 6px; border-bottom: 1px solid #ddd; background: #f5f5f5; flex-shrink: 0; }
+.xlsx-tab { background: #e0e0e0; border: 1px solid #ccc; border-radius: 4px 4px 0 0; padding: 4px 12px; font-size: 12px; cursor: pointer; font-family: var(--font); }
+.xlsx-tab.active { background: #fff; border-bottom-color: #fff; font-weight: 600; }
+.xlsx-table-wrap { overflow: auto; flex: 1; }
+/* PPTX slide cards */
+.pptx-content { display: flex; flex-direction: column; gap: 18px; }
+.pptx-slide { border: 1px solid #ddd; border-radius: 8px; padding: 20px 24px; background: #fff; }
+.pptx-slide-num { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #888; margin-bottom: 10px; }
+.pptx-slide-content { color: #1a1a1a; font-size: 14px; line-height: 1.7; }
 
 @media (max-width: 768px) {
   .mobile-only { display: block; }

@@ -474,6 +474,7 @@ function setupEventListeners() {
     const modal = document.getElementById('file-preview-modal');
     modal.classList.remove('open');
     if (modal._blobUrl) { URL.revokeObjectURL(modal._blobUrl); modal._blobUrl = null; }
+    if (window._xlsxWb) { window._xlsxWb = null; }
     document.getElementById('file-preview-body').innerHTML = '';
   }
   document.getElementById('file-preview-close').addEventListener('click', closeFilePreview);
@@ -980,7 +981,13 @@ async function pollInbox() {
         ? 'To: ' + (decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(headers['To'] || ''))).split(',')[0].trim())
         : fromStr.replace(/<[^>]*>/, '').trim() || fromStr;
       const fromSpan = el('span', 'email-from', displayUser);
-      if (hasAttachment) fromSpan.appendChild(el('span', 'email-att-icon', '📎'));
+      if (hasAttachment) {
+        const ic = document.createElement('span');
+        ic.className = 'email-att-icon';
+        ic.title = 'Has attachment';
+        ic.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>`;
+        fromSpan.appendChild(ic);
+      }
       metaObj.append(fromSpan, el('span', 'email-date', ts));
 
       const subj = decodeEntities(decodeRFC2047(headers['Subject']) || '(no subject)');
@@ -1094,7 +1101,13 @@ function renderEmailList(msgs, clearFirst) {
 
     const metaObj = el('div', 'email-meta');
     const fromSpan = el('span', 'email-from', displayUser);
-    if (hasAttachment) fromSpan.appendChild(el('span', 'email-att-icon', '📎'));
+    if (hasAttachment) {
+      const ic = document.createElement('span');
+      ic.className = 'email-att-icon';
+      ic.title = 'Has attachment';
+      ic.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>`;
+      fromSpan.appendChild(ic);
+    }
     metaObj.append(fromSpan, el('span', 'email-date', ts));
     
     const subj = decodeEntities(decodeRFC2047(headers['Subject']) || '(no subject)');
@@ -1333,16 +1346,34 @@ async function renderEmail(msg) {
       }
       
       chip.append(thumbArea, infoArea);
-      // Open a preview modal for PDF / DOCX / XLSX; download everything else.
-      // Note: legacy .doc (application/msword) is NOT previewable — mammoth.js
-      // only understands the modern .docx (Office Open XML) format.
-      const previewExts = ['pdf', 'docx', 'xlsx', 'xls'];
+      // Open a preview modal for supported types; download everything else.
+      // Legacy .doc and .ppt can't be rendered — they show a "not supported" message with Download.
+      const previewExts = [
+        'pdf',
+        'docx','docm',
+        'xlsx','xls','xlsm',
+        'pptx',
+        'txt','csv','log','md','json','xml',
+        'html','htm',
+        'jpg','jpeg','png','gif','webp','svg','bmp','ico','tiff',
+        'mp4','webm','mov','avi','mkv','ogv','m4v',
+        'mp3','wav','ogg','aac','flac','m4a','opus',
+        // Legacy formats — will render "not supported" message but still offer Download
+        'doc','ppt'
+      ];
       const ext = (a.filename.split('.').pop() || '').toLowerCase();
       const isPreviewable = previewExts.includes(ext) ||
         ['application/pdf',
          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+         'application/vnd.ms-word.document.macroEnabled.12',
          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-         'application/vnd.ms-excel'].includes(a.mime);
+         'application/vnd.ms-excel.sheet.macroEnabled.12',
+         'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        ].includes(a.mime)
+        || (a.mime || '').startsWith('image/')
+        || (a.mime || '').startsWith('video/')
+        || (a.mime || '').startsWith('audio/')
+        || (a.mime || '').startsWith('text/');
       chip.onclick = () => isPreviewable
         ? previewAttachment(msg.id, a.attachmentId, a.filename, a.mime, a.data)
         : downloadAttachment(msg.id, a.attachmentId, a.filename, a.data, a.mime);
@@ -1689,15 +1720,16 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
   const titleEl = document.getElementById('file-preview-title');
 
   titleEl.textContent = filename;
-  bodyEl.innerHTML = '<div class="loading-spinner" style="background:var(--bg);flex:1;"><div class="spinner"></div> Loading preview…</div>';
+  bodyEl.innerHTML = '<div class="loading-spinner" style="background:var(--bg);flex:1;display:flex;align-items:center;justify-content:center;gap:10px;color:var(--text2);"><div class="spinner"></div> Loading preview…</div>';
   modal.classList.add('open');
 
-  // Wire Download button each time so it captures the current file
+  if (modal._blobUrl) { URL.revokeObjectURL(modal._blobUrl); modal._blobUrl = null; }
+  if (window._xlsxWb) { window._xlsxWb = null; }
+
   document.getElementById('file-preview-download').onclick = () =>
     downloadAttachment(msgId, attId, filename, inlineData, mimeType);
 
   try {
-    // Fetch raw bytes
     let b64str = '';
     if (inlineData) {
       b64str = padB64(inlineData);
@@ -1709,39 +1741,112 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
     const bytes   = new Uint8Array(byteStr.length);
     for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
 
-    const ext = (filename.split('.').pop() || '').toLowerCase();
+    const ext  = (filename.split('.').pop() || '').toLowerCase();
+    const mime = (mimeType || '').toLowerCase();
 
-    if (mimeType === 'application/pdf' || ext === 'pdf') {
-      // PDF — native browser renderer via blob URL in an iframe
-      const blob = new Blob([bytes], { type: 'application/pdf' });
-      const url  = URL.createObjectURL(blob);
-      if (modal._blobUrl) URL.revokeObjectURL(modal._blobUrl);
+    function makeBlobUrl(type) {
+      const url = URL.createObjectURL(new Blob([bytes], { type }));
       modal._blobUrl = url;
-      bodyEl.innerHTML = `<iframe src="${url}#view=FitH" style="width:100%;height:100%;border:none;flex:1;"></iframe>`;
+      return url;
+    }
 
-    } else if (ext === 'docx' || mimeType.includes('wordprocessingml')) {
-      // DOCX — mammoth.js converts to HTML
+    // ── PDF ──────────────────────────────────────────────────────────────────
+    if (ext === 'pdf' || mime === 'application/pdf') {
+      bodyEl.innerHTML = `<iframe src="${makeBlobUrl('application/pdf')}#view=FitH" style="width:100%;height:100%;border:none;"></iframe>`;
+
+    // ── Images ───────────────────────────────────────────────────────────────
+    } else if (['jpg','jpeg','png','gif','webp','svg','bmp','ico','tiff','tif'].includes(ext) || mime.startsWith('image/')) {
+      const url = makeBlobUrl(mime.startsWith('image/') ? mime : 'image/' + ext);
+      bodyEl.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;flex:1;padding:20px;background:var(--bg);min-height:0;">
+        <img src="${url}" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:6px;" alt="${escHtml(filename)}">
+      </div>`;
+
+    // ── Video ─────────────────────────────────────────────────────────────────
+    } else if (['mp4','webm','ogv','mov','avi','mkv','m4v'].includes(ext) || mime.startsWith('video/')) {
+      const url = makeBlobUrl(mime.startsWith('video/') ? mime : 'video/' + ext);
+      bodyEl.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;flex:1;padding:20px;background:#000;">
+        <video controls style="max-width:100%;max-height:100%;outline:none;" src="${url}">Your browser does not support this video format.</video>
+      </div>`;
+
+    // ── Audio ─────────────────────────────────────────────────────────────────
+    } else if (['mp3','wav','ogg','aac','flac','m4a','opus','wma'].includes(ext) || mime.startsWith('audio/')) {
+      const url = makeBlobUrl(mime.startsWith('audio/') ? mime : 'audio/' + ext);
+      bodyEl.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;padding:48px 32px;gap:24px;background:var(--bg);">
+        <div style="font-size:64px;line-height:1;">🎵</div>
+        <div style="color:var(--text);font-size:15px;font-weight:500;text-align:center;">${escHtml(filename)}</div>
+        <audio controls src="${url}" style="width:100%;max-width:520px;"></audio>
+      </div>`;
+
+    // ── Plain text / CSV / Markdown / Log ─────────────────────────────────────
+    } else if (['txt','csv','log','md','json','xml','yaml','yml'].includes(ext) || mime.startsWith('text/plain')) {
+      const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+      bodyEl.innerHTML = `<pre class="file-preview-content txt-content">${escHtml(text)}</pre>`;
+
+    // ── HTML ──────────────────────────────────────────────────────────────────
+    } else if (['html','htm'].includes(ext) || mime === 'text/html') {
+      bodyEl.innerHTML = `<iframe src="${makeBlobUrl('text/html')}" sandbox="allow-same-origin allow-scripts" style="width:100%;height:100%;border:none;"></iframe>`;
+
+    // ── DOCX / DOCM ───────────────────────────────────────────────────────────
+    } else if (['docx','docm'].includes(ext) || mime.includes('wordprocessingml')) {
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js');
       const result = await mammoth.convertToHtml({ arrayBuffer: bytes.buffer });
       bodyEl.innerHTML = `<div class="file-preview-content docx-content">${result.value}</div>`;
 
-    } else if (ext === 'xlsx' || ext === 'xls' ||
-               mimeType.includes('spreadsheetml') || mimeType.includes('ms-excel')) {
-      // XLSX / XLS — SheetJS renders first sheet as HTML table
+    // ── XLSX / XLS / XLSM ────────────────────────────────────────────────────
+    } else if (['xlsx','xls','xlsm'].includes(ext) || mime.includes('spreadsheetml') || mime.includes('ms-excel')) {
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
-      const wb   = XLSX.read(bytes, { type: 'array' });
-      const ws   = wb.Sheets[wb.SheetNames[0]];
-      const html = XLSX.utils.sheet_to_html(ws);
-      bodyEl.innerHTML = `<div class="file-preview-content xlsx-content">${html}</div>`;
+      window._xlsxWb = XLSX.read(bytes, { type: 'array' });
+      const wb = window._xlsxWb;
+      const sheetTabs = wb.SheetNames.length > 1
+        ? `<div class="xlsx-tabs">${wb.SheetNames.map((n, i) =>
+            `<button class="xlsx-tab${i===0?' active':''}" onclick="
+              this.parentNode.querySelectorAll('.xlsx-tab').forEach(b=>b.classList.remove('active'));
+              this.classList.add('active');
+              this.closest('.xlsx-content').querySelector('.xlsx-table-wrap').innerHTML=
+                XLSX.utils.sheet_to_html(window._xlsxWb.Sheets[window._xlsxWb.SheetNames[${i}]]);
+            ">${escHtml(n)}</button>`).join('')}</div>` : '';
+      const html = XLSX.utils.sheet_to_html(wb.Sheets[wb.SheetNames[0]]);
+      bodyEl.innerHTML = `<div class="file-preview-content xlsx-content">${sheetTabs}<div class="xlsx-table-wrap">${html}</div></div>`;
 
+    // ── PPTX — slide text via JSZip ──────────────────────────────────────────
+    } else if (ext === 'pptx' || mime.includes('presentationml.presentation')) {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
+      const zip = await JSZip.loadAsync(bytes.buffer);
+      const slideKeys = Object.keys(zip.files)
+        .filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n))
+        .sort((a, b) => parseInt(a.match(/(\d+)\.xml$/)[1]) - parseInt(b.match(/(\d+)\.xml$/)[1]));
+
+      let slidesHtml = '';
+      for (let i = 0; i < slideKeys.length; i++) {
+        const xml  = await zip.files[slideKeys[i]].async('string');
+        const doc  = new DOMParser().parseFromString(xml, 'application/xml');
+        const NS   = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+        const texts = [...doc.getElementsByTagNameNS(NS, 't')]
+          .map(t => t.textContent.trim()).filter(Boolean);
+        if (texts.length) {
+          slidesHtml += `<div class="pptx-slide">
+            <div class="pptx-slide-num">Slide ${i + 1} of ${slideKeys.length}</div>
+            <div class="pptx-slide-content">${texts.map(t => escHtml(t)).join('<br>')}</div>
+          </div>`;
+        }
+      }
+      bodyEl.innerHTML = slidesHtml
+        ? `<div class="file-preview-content pptx-content">${slidesHtml}</div>`
+        : `<div class="file-preview-unsupported">No readable text content found in this presentation.</div>`;
+
+    // ── Legacy / unsupported ──────────────────────────────────────────────────
     } else {
+      const label = { ppt: 'PowerPoint 97–2003 (.ppt)', doc: 'Word 97–2003 (.doc)' }[ext]
+                 || escHtml((ext || 'this file type').toUpperCase());
       bodyEl.innerHTML = `<div class="file-preview-unsupported">
-        Preview is not available for <strong>${escHtml(filename)}</strong>.<br>
-        Use the Download button to open it in the appropriate application.
+        <strong>Preview not available for ${label}.</strong><br>
+        Use the <em>Download</em> button to open it in the appropriate application.
       </div>`;
     }
   } catch (e) {
-    bodyEl.innerHTML = `<div class="file-preview-unsupported">Failed to load preview.<br><small>${escHtml(e.message)}</small></div>`;
+    bodyEl.innerHTML = `<div class="file-preview-unsupported">
+      Failed to load preview.<br><small style="opacity:.6;">${escHtml(e.message)}</small>
+    </div>`;
   }
 }
 
@@ -1758,7 +1863,9 @@ function toggleReply(forceClose = false) {
     const toEl = viewer.querySelector('.email-meta-row:nth-child(3) .email-meta-val');
     const targetRecipient = State.mail.label === 'SENT' ? toEl?.textContent : fromEl?.textContent;
     
-    document.getElementById('reply-to').value = targetRecipient || '';
+    document.getElementById('reply-to').value  = targetRecipient || '';
+    document.getElementById('reply-cc').value  = '';
+    document.getElementById('reply-bcc').value = '';
     const subj = viewer.querySelector('.email-title')?.textContent || '';
     document.getElementById('reply-subject').value = subj.startsWith('Re:') ? subj : 'Re: ' + subj;
     
@@ -1787,14 +1894,16 @@ function toggleReply(forceClose = false) {
 }
 
 async function sendReply() {
-  const to = document.getElementById('reply-to').value.replace(/;/g, ',').trim();
+  const to  = document.getElementById('reply-to').value.replace(/;/g, ',').trim();
+  const cc  = document.getElementById('reply-cc').value.replace(/;/g, ',').trim();
+  const bcc = document.getElementById('reply-bcc').value.replace(/;/g, ',').trim();
   const subj = document.getElementById('reply-subject').value.trim();
   const body = document.getElementById('reply-body').innerHTML;
   if (!to) return toast('Recipient is required', 'error');
 
   try {
-    await sendRawEmail(to, '', subj, body, State.reply.attachments, State.compose.currentThreadId);
-    toggleReply(true); 
+    await sendRawEmail(to, cc, bcc, subj, body, State.reply.attachments, State.compose.currentThreadId);
+    toggleReply(true);
     toast('Reply sent!', 'success');
     refreshCurrent();
   } catch (e) { toast('Failed to send reply: ' + e.message, 'error'); }
@@ -1804,10 +1913,11 @@ function openComposeModal(to='', subj='', bodyHtml='', title='New Message', keep
   document.getElementById('compose-modal').classList.add('open');
   document.getElementById('compose-title').textContent = title;
   document.getElementById('compose-to').value = to;
-  document.getElementById('compose-cc').value = '';
+  document.getElementById('compose-cc').value  = '';
+  document.getElementById('compose-bcc').value = '';
   document.getElementById('compose-subject').value = subj;
   document.getElementById('compose-body-text').innerHTML = bodyHtml;
-  if (!keepAttachments) State.compose.attachments =[];
+  if (!keepAttachments) State.compose.attachments = [];
   renderAttachmentChips('compose');
 }
 
@@ -1855,27 +1965,29 @@ function renderAttachmentChips(type) {
 }
 
 async function sendEmail() {
-  const to = document.getElementById('compose-to').value.replace(/;/g, ',').trim();
-  const cc = document.getElementById('compose-cc').value.replace(/;/g, ',').trim();
+  const to  = document.getElementById('compose-to').value.replace(/;/g, ',').trim();
+  const cc  = document.getElementById('compose-cc').value.replace(/;/g, ',').trim();
+  const bcc = document.getElementById('compose-bcc').value.replace(/;/g, ',').trim();
   const subj = document.getElementById('compose-subject').value.trim();
   const body = document.getElementById('compose-body-text').innerHTML;
   if (!to) return toast('Recipient required', 'error');
-  
+
   try {
-    await sendRawEmail(to, cc, subj, body, State.compose.attachments, null);
+    await sendRawEmail(to, cc, bcc, subj, body, State.compose.attachments, null);
     document.getElementById('compose-modal').classList.remove('open');
-    State.compose.attachments =[];
+    State.compose.attachments = [];
     toast('Sent successfully', 'success');
     refreshCurrent();
   } catch (e) { toast('Failed to send: ' + e.message, 'error'); }
 }
 
-async function sendRawEmail(to, cc, subject, htmlBody, attachments, threadId) {
+async function sendRawEmail(to, cc, bcc, subject, htmlBody, attachments, threadId) {
   const boundaryMixed = 'aether_mixed_' + Math.random().toString(36).substr(2);
-  const boundaryRel = 'aether_rel_' + Math.random().toString(36).substr(2);
-  
+  const boundaryRel   = 'aether_rel_'   + Math.random().toString(36).substr(2);
+
   let emailStr = `To: ${encodeAddressList(to)}\r\n`;
-  if (cc) emailStr += `Cc: ${encodeAddressList(cc)}\r\n`;
+  if (cc)  emailStr += `Cc: ${encodeAddressList(cc)}\r\n`;
+  if (bcc) emailStr += `Bcc: ${encodeAddressList(bcc)}\r\n`;
   emailStr += `Subject: ${encodeSubject(subject)}\r\n`;
   emailStr += `MIME-Version: 1.0\r\n`;
 
