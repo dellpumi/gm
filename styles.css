@@ -333,11 +333,48 @@ button { outline: none; font-family: var(--font); }
 .xlsx-tab { background: #e0e0e0; border: 1px solid #ccc; border-radius: 4px 4px 0 0; padding: 4px 12px; font-size: 12px; cursor: pointer; font-family: var(--font); }
 .xlsx-tab.active { background: #fff; border-bottom-color: #fff; font-weight: 600; }
 .xlsx-table-wrap { overflow: auto; flex: 1; }
-/* PPTX slide cards */
-.pptx-content { display: flex; flex-direction: column; gap: 18px; }
-.pptx-slide { border: 1px solid #ddd; border-radius: 8px; padding: 20px 24px; background: #fff; }
-.pptx-slide-num { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #888; margin-bottom: 10px; }
-.pptx-slide-content { color: #1a1a1a; font-size: 14px; line-height: 1.7; }
+
+/* PPTX — positioned canvas slides */
+.pptx-content { display: flex; flex-direction: column; gap: 24px; }
+.pptx-slide-card { display: flex; flex-direction: column; gap: 6px; }
+.pptx-slide-label { font-size: 10px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: #888; }
+.pptx-canvas { position: relative; width: 100%; box-shadow: 0 2px 16px rgba(0,0,0,0.18); border: 1px solid #ddd; container-type: inline-size; overflow: hidden; }
+.pptx-canvas-inner { position: absolute; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; font-size: 2cqw; }
+
+/* DOCX — richer typography */
+.docx-content { font-family: 'Georgia', 'Times New Roman', serif; max-width: 820px; margin: 0 auto; color: #1a1a1a; line-height: 1.75; }
+.docx-content h1 { font-size: 26px; border-bottom: 2px solid #e0e0e0; padding-bottom: 8px; margin: 1.2em 0 0.5em; }
+.docx-content h2 { font-size: 20px; margin: 1.1em 0 0.4em; }
+.docx-content h3 { font-size: 16px; margin: 0.9em 0 0.3em; }
+.docx-content h4 { font-size: 14px; margin: 0.8em 0 0.3em; }
+.docx-content p  { margin: 0 0 0.75em; }
+.docx-content table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+.docx-content td, .docx-content th { border: 1px solid #ccc; padding: 7px 11px; }
+.docx-content th { background: #f0f0f0; font-weight: 600; }
+.docx-content img { max-width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 3px; }
+.docx-content ul, .docx-content ol { margin: 0.4em 0 0.8em 1.6em; }
+.docx-content li { margin: 3px 0; }
+.docx-content blockquote { border-left: 4px solid #ddd; margin: 1em 0; padding: 6px 16px; color: #555; font-style: italic; background: #fafafa; }
+.doc-title { font-size: 30px !important; text-align: center; margin-bottom: 0.2em; }
+.doc-subtitle { font-size: 15px; color: #666; text-align: center; margin-top: 0; }
+
+/* ZIP / Archive listing */
+.archive-wrap { display: flex; flex-direction: column; height: 100%; background: var(--bg); }
+.archive-summary { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; padding: 11px 20px; background: var(--surface); border-bottom: 1px solid #ddd; font-size: 13px; color: var(--text2); flex-shrink: 0; }
+.archive-summary span:first-child { font-weight: 600; color: var(--text); }
+.archive-scroll { flex: 1; overflow: auto; }
+.archive-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.archive-table thead th { position: sticky; top: 0; background: #f0f0f0; border-bottom: 2px solid #ddd; padding: 7px 10px; text-align: left; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #555; }
+.ae-row { border-bottom: 1px solid #f0f0f0; }
+.ae-row:hover { background: #f8f8f8; }
+.ae-dir .ae-name-col { font-weight: 600; color: #555; }
+.ae-icon-col { width: 30px; padding: 5px 4px 5px 12px; text-align: center; }
+.ae-name-col { padding: 5px 8px; word-break: break-all; color: #1a1a1a; }
+.ae-size-col { width: 80px; padding: 5px 8px; text-align: right; color: #777; white-space: nowrap; }
+.ae-date-col { width: 96px; padding: 5px 8px; color: #888; white-space: nowrap; }
+.ae-btn-col  { width: 34px; padding: 4px 8px 4px 4px; text-align: center; }
+.ae-extract  { background: none; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-size: 11px; padding: 2px 5px; color: #555; }
+.ae-extract:hover { background: #e6f4ea; border-color: #5a9; color: #2a6; }
 
 @media (max-width: 768px) {
   .mobile-only { display: block; }

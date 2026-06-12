@@ -474,7 +474,9 @@ function setupEventListeners() {
     const modal = document.getElementById('file-preview-modal');
     modal.classList.remove('open');
     if (modal._blobUrl) { URL.revokeObjectURL(modal._blobUrl); modal._blobUrl = null; }
-    if (window._xlsxWb) { window._xlsxWb = null; }
+    if (window._xlsxWb)    { window._xlsxWb = null; }
+    if (window._zipInst)   { window._zipInst = null; }
+    if (window._zipExtract){ window._zipExtract = null; }
     document.getElementById('file-preview-body').innerHTML = '';
   }
   document.getElementById('file-preview-close').addEventListener('click', closeFilePreview);
@@ -1353,12 +1355,12 @@ async function renderEmail(msg) {
         'docx','docm',
         'xlsx','xls','xlsm',
         'pptx',
+        'zip','rar','7z','tar','gz','bz2','cab','iso',
         'txt','csv','log','md','json','xml',
         'html','htm',
         'jpg','jpeg','png','gif','webp','svg','bmp','ico','tiff',
         'mp4','webm','mov','avi','mkv','ogv','m4v',
         'mp3','wav','ogg','aac','flac','m4a','opus',
-        // Legacy formats — will render "not supported" message but still offer Download
         'doc','ppt'
       ];
       const ext = (a.filename.split('.').pop() || '').toLowerCase();
@@ -1789,7 +1791,22 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
     // ── DOCX / DOCM ───────────────────────────────────────────────────────────
     } else if (['docx','docm'].includes(ext) || mime.includes('wordprocessingml')) {
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js');
-      const result = await mammoth.convertToHtml({ arrayBuffer: bytes.buffer });
+      const options = {
+        convertImage: mammoth.images.imgElement(img =>
+          img.read('base64').then(data => ({ src: 'data:' + img.contentType + ';base64,' + data }))
+        ),
+        styleMap: [
+          "p[style-name='Heading 1'] => h1:fresh",
+          "p[style-name='Heading 2'] => h2:fresh",
+          "p[style-name='Heading 3'] => h3:fresh",
+          "p[style-name='Heading 4'] => h4:fresh",
+          "p[style-name='Title'] => h1.doc-title:fresh",
+          "p[style-name='Subtitle'] => p.doc-subtitle:fresh",
+          "p[style-name='Quote'] => blockquote:fresh",
+          "p[style-name='Intense Quote'] => blockquote:fresh",
+        ]
+      };
+      const result = await mammoth.convertToHtml({ arrayBuffer: bytes.buffer }, options);
       bodyEl.innerHTML = `<div class="file-preview-content docx-content">${result.value}</div>`;
 
     // ── XLSX / XLS / XLSM ────────────────────────────────────────────────────
@@ -1808,31 +1825,106 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
       const html = XLSX.utils.sheet_to_html(wb.Sheets[wb.SheetNames[0]]);
       bodyEl.innerHTML = `<div class="file-preview-content xlsx-content">${sheetTabs}<div class="xlsx-table-wrap">${html}</div></div>`;
 
-    // ── PPTX — slide text via JSZip ──────────────────────────────────────────
+    // ── PPTX — full positioned canvas renderer with images ───────────────────
     } else if (ext === 'pptx' || mime.includes('presentationml.presentation')) {
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
-      const zip = await JSZip.loadAsync(bytes.buffer);
-      const slideKeys = Object.keys(zip.files)
-        .filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n))
-        .sort((a, b) => parseInt(a.match(/(\d+)\.xml$/)[1]) - parseInt(b.match(/(\d+)\.xml$/)[1]));
+      const slidesHtml = await renderPptxSlides(bytes);
+      bodyEl.innerHTML = `<div class="file-preview-content pptx-content">${slidesHtml}</div>`;
 
-      let slidesHtml = '';
-      for (let i = 0; i < slideKeys.length; i++) {
-        const xml  = await zip.files[slideKeys[i]].async('string');
-        const doc  = new DOMParser().parseFromString(xml, 'application/xml');
-        const NS   = 'http://schemas.openxmlformats.org/drawingml/2006/main';
-        const texts = [...doc.getElementsByTagNameNS(NS, 't')]
-          .map(t => t.textContent.trim()).filter(Boolean);
-        if (texts.length) {
-          slidesHtml += `<div class="pptx-slide">
-            <div class="pptx-slide-num">Slide ${i + 1} of ${slideKeys.length}</div>
-            <div class="pptx-slide-content">${texts.map(t => escHtml(t)).join('<br>')}</div>
-          </div>`;
-        }
+    // ── ZIP — list contents with per-file extract ─────────────────────────────
+    } else if (['zip'].includes(ext) || mime === 'application/zip' || mime === 'application/x-zip-compressed') {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
+      const zip = await JSZip.loadAsync(bytes.buffer);
+
+      const entries = [];
+      zip.forEach((path, file) => entries.push({ path, file, isDir: file.dir, size: file._data?.uncompressedSize || 0, date: file.date }));
+      entries.sort((a, b) => (a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.path.localeCompare(b.path)));
+
+      const fileCount = entries.filter(e => !e.isDir).length;
+      const dirCount  = entries.filter(e =>  e.isDir).length;
+      const totalSize = entries.reduce((s, e) => s + (e.isDir ? 0 : (e.size || 0)), 0);
+
+      function fmtSize(n) {
+        if (!n || n < 1) return '0 B';
+        if (n < 1024)       return n + ' B';
+        if (n < 1048576)    return (n / 1024).toFixed(1) + ' KB';
+        if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+        return (n / 1073741824).toFixed(2) + ' GB';
       }
-      bodyEl.innerHTML = slidesHtml
-        ? `<div class="file-preview-content pptx-content">${slidesHtml}</div>`
-        : `<div class="file-preview-unsupported">No readable text content found in this presentation.</div>`;
+
+      const EXT_ICONS = {
+        pdf:'📕', jpg:'🖼', jpeg:'🖼', png:'🖼', gif:'🖼', svg:'🖼', webp:'🖼', bmp:'🖼',
+        mp4:'🎬', avi:'🎬', mkv:'🎬', mov:'🎬', webm:'🎬',
+        mp3:'🎵', wav:'🎵', flac:'🎵', aac:'🎵', ogg:'🎵',
+        doc:'📝', docx:'📝', xls:'📊', xlsx:'📊', ppt:'📊', pptx:'📊',
+        zip:'🗜', rar:'🗜', '7z':'🗜', tar:'🗜', gz:'🗜',
+        html:'🌐', css:'🎨', js:'⚙', ts:'⚙', json:'⚙',
+        txt:'📄', md:'📄', csv:'📄', xml:'📄', log:'📄',
+        exe:'⚙', sh:'⚙', bat:'⚙', py:'⚙', rb:'⚙',
+      };
+
+      // Store for inline extract buttons
+      window._zipInst = zip;
+      window._zipExtract = async (path) => {
+        try {
+          const f = window._zipInst?.files[path];
+          if (!f) return;
+          const data = await f.async('uint8array');
+          const name = path.split('/').pop();
+          const e2   = name.split('.').pop().toLowerCase();
+          const MIME2 = { pdf:'application/pdf', txt:'text/plain', html:'text/html', json:'application/json' };
+          const blob = new Blob([data], { type: MIME2[e2] || 'application/octet-stream' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob); a.download = name; a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        } catch (ex) { toast('Extract failed: ' + ex.message, 'error'); }
+      };
+
+      const rows = entries.map(e => {
+        const depth = Math.max(0, (e.path.match(/\//g) || []).length - (e.isDir ? 1 : 0));
+        const icon  = e.isDir ? '📁' : (EXT_ICONS[(e.path.split('.').pop() || '').toLowerCase()] || '📄');
+        const size  = e.isDir ? '—' : fmtSize(e.size);
+        const date  = e.date instanceof Date ? e.date.toLocaleDateString() : '—';
+        const safe  = e.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const btn   = e.isDir ? '' : `<button class="ae-extract" title="Download this file" onclick="window._zipExtract('${safe}')">⬇</button>`;
+        return `<tr class="ae-row${e.isDir ? ' ae-dir' : ''}">
+          <td class="ae-icon-col">${icon}</td>
+          <td class="ae-name-col" style="padding-left:${8 + depth * 16}px">${escHtml(e.path)}</td>
+          <td class="ae-size-col">${size}</td>
+          <td class="ae-date-col">${date}</td>
+          <td class="ae-btn-col">${btn}</td>
+        </tr>`;
+      }).join('');
+
+      bodyEl.innerHTML = `<div class="archive-wrap">
+        <div class="archive-summary">
+          <span>📦 ${escHtml(filename)}</span>
+          <span>${fileCount} file${fileCount !== 1 ? 's' : ''}, ${dirCount} folder${dirCount !== 1 ? 's' : ''}</span>
+          <span>Uncompressed: ${fmtSize(totalSize)}</span>
+        </div>
+        <div class="archive-scroll">
+          <table class="archive-table">
+            <thead><tr>
+              <th class="ae-icon-col"></th>
+              <th class="ae-name-col">Name</th>
+              <th class="ae-size-col">Size</th>
+              <th class="ae-date-col">Modified</th>
+              <th class="ae-btn-col"></th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+
+    // ── RAR / 7z / TAR / GZ — no reliable browser parser ────────────────────
+    } else if (['rar','7z','tar','gz','bz2','xz','cab','iso'].includes(ext) ||
+               mime.includes('x-rar') || mime.includes('x-7z') || mime.includes('x-tar')) {
+      const FMT = { rar:'RAR', '7z':'7-Zip', tar:'TAR', gz:'GZip', bz2:'BZip2', xz:'XZ', cab:'CAB', iso:'ISO' };
+      bodyEl.innerHTML = `<div class="file-preview-unsupported">
+        <strong>${FMT[ext] || ext.toUpperCase()} archives cannot be listed in the browser.</strong><br>
+        Download the file to inspect its contents with a compatible application<br>
+        (WinRAR, 7-Zip, The Unarchiver, etc.)
+      </div>`;
 
     // ── Legacy / unsupported ──────────────────────────────────────────────────
     } else {
@@ -1848,6 +1940,191 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
       Failed to load preview.<br><small style="opacity:.6;">${escHtml(e.message)}</small>
     </div>`;
   }
+}
+
+// ── renderPptxSlides: full positioned canvas renderer ─────────────────────────
+// Reads slide XML, relationship files and media from the JSZip instance,
+// renders each slide as a percentage-positioned canvas with text formatting
+// and embedded images. Requires JSZip to be loaded before calling.
+async function renderPptxSlides(bytes) {
+  const NS_P = 'http://schemas.openxmlformats.org/presentationml/2006/main';
+  const NS_A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+  const NS_R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const parse = xml => new DOMParser().parseFromString(xml, 'application/xml');
+
+  const zip = await JSZip.loadAsync(bytes.buffer);
+
+  // Slide dimensions from presentation.xml (default widescreen 16:9)
+  let slideW = 9144000, slideH = 5143500;
+  const presFile = zip.file('ppt/presentation.xml');
+  if (presFile) {
+    const pDoc = parse(await presFile.async('string'));
+    const sz = pDoc.getElementsByTagNameNS(NS_P, 'sldSz')[0] || pDoc.querySelector('sldSz');
+    if (sz) {
+      slideW = parseInt(sz.getAttribute('cx')) || slideW;
+      slideH = parseInt(sz.getAttribute('cy')) || slideH;
+    }
+  }
+
+  // EMU → percentage of slide dimension
+  const pct = (emu, total) => (emu / total * 100).toFixed(3) + '%';
+  // Font size: PPTX stores in hundredths of a point. Convert to cqw so it
+  // scales with the canvas width (requires container-type:inline-size on .pptx-canvas).
+  // Formula: (pt / (slideWidthInches * 100)) where slideWidthInches = slideW/914400
+  const ptToCqw = sz => ((sz / 100) / (slideW / 914400) / 100).toFixed(4) + 'cqw';
+
+  function getHexColor(el) {
+    if (!el) return null;
+    const s = el.getElementsByTagNameNS(NS_A, 'srgbClr')[0];
+    if (s) return '#' + s.getAttribute('val');
+    const sys = el.getElementsByTagNameNS(NS_A, 'sysClr')[0];
+    if (sys) return '#' + (sys.getAttribute('lastClr') || '000000');
+    return null;
+  }
+
+  // Media cache: zip path → base64 string
+  const mediaCache = {};
+  async function getMediaB64(path) {
+    if (mediaCache[path]) return mediaCache[path];
+    const f = zip.file(path);
+    if (!f) return null;
+    return (mediaCache[path] = await f.async('base64'));
+  }
+
+  function resolveTarget(target) {
+    if (!target) return null;
+    if (target.startsWith('../')) return 'ppt/' + target.slice(3);
+    if (target.startsWith('/'))   return target.slice(1);
+    return 'ppt/slides/' + target;
+  }
+
+  const slideKeys = Object.keys(zip.files)
+    .filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n))
+    .sort((a, b) => +a.match(/(\d+)\.xml$/)[1] - +b.match(/(\d+)\.xml$/)[1]);
+
+  const IMG_MIME = {
+    jpg:'image/jpeg', jpeg:'image/jpeg', png:'image/png',
+    gif:'image/gif', svg:'image/svg+xml', bmp:'image/bmp', webp:'image/webp'
+  };
+
+  let allHtml = '';
+
+  for (let si = 0; si < slideKeys.length; si++) {
+    const slideFilename = slideKeys[si].split('/').pop();
+    const sDoc = parse(await zip.files[slideKeys[si]].async('string'));
+
+    // Build relationship map rId → resolved media path
+    const relsMap = {};
+    const relFile = zip.file(`ppt/slides/_rels/${slideFilename}.rels`);
+    if (relFile) {
+      const rDoc = parse(await relFile.async('string'));
+      rDoc.querySelectorAll('Relationship').forEach(r => {
+        relsMap[r.getAttribute('Id')] = resolveTarget(r.getAttribute('Target'));
+      });
+    }
+
+    // Slide background colour
+    let bgStyle = 'background:#ffffff';
+    const bgEl = sDoc.getElementsByTagNameNS(NS_P, 'bg')[0];
+    if (bgEl) {
+      const sf = bgEl.getElementsByTagNameNS(NS_A, 'solidFill')[0];
+      const c  = getHexColor(sf);
+      if (c) bgStyle = 'background:' + c;
+    }
+
+    let inner = '';
+
+    // ── Text shapes (p:sp) ────────────────────────────────────────────────
+    for (const sp of sDoc.getElementsByTagNameNS(NS_P, 'sp')) {
+      const xfrm = sp.getElementsByTagNameNS(NS_A, 'xfrm')[0];
+      if (!xfrm) continue;
+      const off  = xfrm.getElementsByTagNameNS(NS_A, 'off')[0];
+      const ext  = xfrm.getElementsByTagNameNS(NS_A, 'ext')[0];
+      if (!off || !ext) continue;
+
+      const x = +off.getAttribute('x'), y = +off.getAttribute('y');
+      const w = +ext.getAttribute('cx'), h = +ext.getAttribute('cy');
+
+      const txBody = sp.getElementsByTagNameNS(NS_P, 'txBody')[0];
+      if (!txBody) continue;
+
+      let paraHtml = '';
+      for (const para of txBody.getElementsByTagNameNS(NS_A, 'p')) {
+        const pPr  = para.getElementsByTagNameNS(NS_A, 'pPr')[0];
+        const algn = pPr?.getAttribute('algn') || 'l';
+        const ta   = algn === 'ctr' ? 'center' : algn === 'r' ? 'right' : algn === 'just' ? 'justify' : 'left';
+
+        let spanHtml = '';
+        for (const run of para.getElementsByTagNameNS(NS_A, 'r')) {
+          const rPr = run.getElementsByTagNameNS(NS_A, 'rPr')[0];
+          const t   = run.getElementsByTagNameNS(NS_A, 't')[0];
+          const txt = t?.textContent;
+          if (!txt) continue;
+
+          const styles = [];
+          const sz = rPr?.getAttribute('sz');
+          if (sz) styles.push('font-size:' + ptToCqw(+sz));
+          if (rPr?.getAttribute('b') === '1') styles.push('font-weight:700');
+          if (rPr?.getAttribute('i') === '1') styles.push('font-style:italic');
+          const u = rPr?.getAttribute('u');
+          if (u && u !== 'none') styles.push('text-decoration:underline');
+          const sf  = rPr?.getElementsByTagNameNS(NS_A, 'solidFill')[0];
+          const clr = getHexColor(sf);
+          if (clr) styles.push('color:' + clr);
+
+          spanHtml += styles.length
+            ? `<span style="${styles.join(';')}">${escHtml(txt)}</span>`
+            : escHtml(txt);
+        }
+        paraHtml += `<div style="text-align:${ta};min-height:1.2em;">${spanHtml || '\u00a0'}</div>`;
+      }
+
+      if (paraHtml) {
+        inner += `<div style="position:absolute;left:${pct(x,slideW)};top:${pct(y,slideH)};width:${pct(w,slideW)};height:${pct(h,slideH)};overflow:hidden;line-height:1.25;">${paraHtml}</div>`;
+      }
+    }
+
+    // ── Images (p:pic) ────────────────────────────────────────────────────
+    for (const pic of sDoc.getElementsByTagNameNS(NS_P, 'pic')) {
+      const spPr  = pic.getElementsByTagNameNS(NS_P, 'spPr')[0];
+      const xfrm  = spPr?.getElementsByTagNameNS(NS_A, 'xfrm')[0];
+      const off   = xfrm?.getElementsByTagNameNS(NS_A, 'off')[0];
+      const extEl = xfrm?.getElementsByTagNameNS(NS_A, 'ext')[0];
+      if (!off || !extEl) continue;
+
+      const x = +off.getAttribute('x'), y = +off.getAttribute('y');
+      const w = +extEl.getAttribute('cx'), h = +extEl.getAttribute('cy');
+
+      const blipFill = pic.getElementsByTagNameNS(NS_P, 'blipFill')[0];
+      const blip     = blipFill?.getElementsByTagNameNS(NS_A, 'blip')[0];
+      if (!blip) continue;
+
+      const rId = blip.getAttributeNS(NS_R, 'embed') || blip.getAttribute('r:embed');
+      if (!rId || !relsMap[rId]) continue;
+
+      const mediaPath = relsMap[rId];
+      const mediaExt  = (mediaPath.split('.').pop() || '').toLowerCase();
+      if (['emf','wmf'].includes(mediaExt)) continue; // Windows metafiles not renderable
+
+      const b64 = await getMediaB64(mediaPath);
+      if (!b64) continue;
+
+      const imgMime = IMG_MIME[mediaExt] || 'image/' + mediaExt;
+      inner += `<div style="position:absolute;left:${pct(x,slideW)};top:${pct(y,slideH)};width:${pct(w,slideW)};height:${pct(h,slideH)};overflow:hidden;">
+        <img src="data:${imgMime};base64,${b64}" style="width:100%;height:100%;object-fit:fill;" alt="">
+      </div>`;
+    }
+
+    const aspectPct = (slideH / slideW * 100).toFixed(3);
+    allHtml += `<div class="pptx-slide-card">
+      <div class="pptx-slide-label">Slide ${si + 1} / ${slideKeys.length}</div>
+      <div class="pptx-canvas" style="${bgStyle};padding-top:${aspectPct}%">
+        <div class="pptx-canvas-inner">${inner || '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#bbb;font-size:2cqw;">Empty slide</div>'}</div>
+      </div>
+    </div>`;
+  }
+
+  return allHtml || '<div class="file-preview-unsupported">No slides found in this presentation.</div>';
 }
 
 function toggleReply(forceClose = false) {
