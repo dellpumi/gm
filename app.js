@@ -1968,10 +1968,16 @@ async function renderPptxSlides(bytes) {
 
   // EMU → percentage of slide dimension
   const pct = (emu, total) => (emu / total * 100).toFixed(3) + '%';
-  // Font size: PPTX stores in hundredths of a point. Convert to cqw so it
-  // scales with the canvas width (requires container-type:inline-size on .pptx-canvas).
-  // Formula: (pt / (slideWidthInches * 100)) where slideWidthInches = slideW/914400
-  const ptToCqw = sz => ((sz / 100) / (slideW / 914400) / 100).toFixed(4) + 'cqw';
+
+  // Font size: PPTX stores in hundredths of a point.
+  // Correct formula: sz_hundredths × 12700 / slideW_emu = cqw
+  // Derivation: pt = sz/100; slideWidthPt = slideW/12700; fraction = pt/slideWidthPt = sz*12700/(100*slideW)
+  // 1 cqw = 1% of container width, so cqw = fraction * 100 = sz*12700/slideW
+  const ptToCqw = sz => (sz * 12700 / slideW).toFixed(4) + 'cqw';
+
+  // Placeholder types that carry no real text in the slide XML
+  // (they are filled by PowerPoint at runtime with date/footer/page number)
+  const SKIP_PH_TYPES = new Set(['ftr', 'dt', 'sldNum', 'hdr']);
 
   function getHexColor(el) {
     if (!el) return null;
@@ -2036,6 +2042,12 @@ async function renderPptxSlides(bytes) {
 
     // ── Text shapes (p:sp) ────────────────────────────────────────────────
     for (const sp of sDoc.getElementsByTagNameNS(NS_P, 'sp')) {
+      // Skip dynamic-content placeholders (footer, date, slide number, header)
+      // — their text lives in the slide master, not the slide XML itself.
+      const ph = sp.querySelector('ph, [type]');
+      const phType = ph?.getAttribute('type') || '';
+      if (SKIP_PH_TYPES.has(phType)) continue;
+
       const xfrm = sp.getElementsByTagNameNS(NS_A, 'xfrm')[0];
       if (!xfrm) continue;
       const off  = xfrm.getElementsByTagNameNS(NS_A, 'off')[0];
@@ -2048,7 +2060,13 @@ async function renderPptxSlides(bytes) {
       const txBody = sp.getElementsByTagNameNS(NS_P, 'txBody')[0];
       if (!txBody) continue;
 
+      // Collect default list-level font size from <a:lstStyle> if present
+      const lstDef = txBody.getElementsByTagNameNS(NS_A, 'lstStyle')[0];
+      const defSz  = parseInt(lstDef?.getElementsByTagNameNS(NS_A, 'defRPr')[0]?.getAttribute('sz') || '0');
+
       let paraHtml = '';
+      let hasRealText = false;
+
       for (const para of txBody.getElementsByTagNameNS(NS_A, 'p')) {
         const pPr  = para.getElementsByTagNameNS(NS_A, 'pPr')[0];
         const algn = pPr?.getAttribute('algn') || 'l';
@@ -2060,10 +2078,13 @@ async function renderPptxSlides(bytes) {
           const t   = run.getElementsByTagNameNS(NS_A, 't')[0];
           const txt = t?.textContent;
           if (!txt) continue;
+          hasRealText = true;
 
           const styles = [];
-          const sz = rPr?.getAttribute('sz');
-          if (sz) styles.push('font-size:' + ptToCqw(+sz));
+          const szRaw = rPr?.getAttribute('sz');
+          // Use run size → list-level default → body default 1800 (18pt)
+          const sz = szRaw ? +szRaw : (defSz || 1800);
+          styles.push('font-size:' + ptToCqw(sz));
           if (rPr?.getAttribute('b') === '1') styles.push('font-weight:700');
           if (rPr?.getAttribute('i') === '1') styles.push('font-style:italic');
           const u = rPr?.getAttribute('u');
@@ -2072,15 +2093,17 @@ async function renderPptxSlides(bytes) {
           const clr = getHexColor(sf);
           if (clr) styles.push('color:' + clr);
 
-          spanHtml += styles.length
-            ? `<span style="${styles.join(';')}">${escHtml(txt)}</span>`
-            : escHtml(txt);
+          spanHtml += `<span style="${styles.join(';')}">${escHtml(txt)}</span>`;
         }
-        paraHtml += `<div style="text-align:${ta};min-height:1.2em;">${spanHtml || '\u00a0'}</div>`;
+        // Only emit the paragraph div if it has visible text
+        if (spanHtml) {
+          paraHtml += `<div style="text-align:${ta};line-height:1.3;margin:0;">${spanHtml}</div>`;
+        }
       }
 
-      if (paraHtml) {
-        inner += `<div style="position:absolute;left:${pct(x,slideW)};top:${pct(y,slideH)};width:${pct(w,slideW)};height:${pct(h,slideH)};overflow:hidden;line-height:1.25;">${paraHtml}</div>`;
+      // Only render the text box if there is actual text to show
+      if (hasRealText && paraHtml) {
+        inner += `<div style="position:absolute;left:${pct(x,slideW)};top:${pct(y,slideH)};width:${pct(w,slideW)};height:${pct(h,slideH)};overflow:hidden;">${paraHtml}</div>`;
       }
     }
 

@@ -358,20 +358,20 @@ button { outline: none; font-family: var(--font); }
 .doc-title { font-size: 30px !important; text-align: center; margin-bottom: 0.2em; }
 .doc-subtitle { font-size: 15px; color: #666; text-align: center; margin-top: 0; }
 
-/* ZIP / Archive listing */
-.archive-wrap { display: flex; flex-direction: column; height: 100%; background: var(--bg); }
-.archive-summary { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; padding: 11px 20px; background: var(--surface); border-bottom: 1px solid #ddd; font-size: 13px; color: var(--text2); flex-shrink: 0; }
-.archive-summary span:first-child { font-weight: 600; color: var(--text); }
-.archive-scroll { flex: 1; overflow: auto; }
+/* ZIP / Archive listing — always rendered light (like a file manager) */
+.archive-wrap { display: flex; flex-direction: column; height: 100%; background: #ffffff; }
+.archive-summary { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; padding: 11px 20px; background: #f5f5f5; border-bottom: 1px solid #ddd; font-size: 13px; color: #555; flex-shrink: 0; }
+.archive-summary span:first-child { font-weight: 600; color: #222; }
+.archive-scroll { flex: 1; overflow: auto; background: #ffffff; }
 .archive-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .archive-table thead th { position: sticky; top: 0; background: #f0f0f0; border-bottom: 2px solid #ddd; padding: 7px 10px; text-align: left; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #555; }
-.ae-row { border-bottom: 1px solid #f0f0f0; }
-.ae-row:hover { background: #f8f8f8; }
-.ae-dir .ae-name-col { font-weight: 600; color: #555; }
+.ae-row { border-bottom: 1px solid #eeeeee; background: #ffffff; }
+.ae-row:hover { background: #eef6ff; }
+.ae-dir .ae-name-col { font-weight: 600; color: #444; }
 .ae-icon-col { width: 30px; padding: 5px 4px 5px 12px; text-align: center; }
 .ae-name-col { padding: 5px 8px; word-break: break-all; color: #1a1a1a; }
-.ae-size-col { width: 80px; padding: 5px 8px; text-align: right; color: #777; white-space: nowrap; }
-.ae-date-col { width: 96px; padding: 5px 8px; color: #888; white-space: nowrap; }
+.ae-size-col { width: 80px; padding: 5px 8px; text-align: right; color: #666; white-space: nowrap; }
+.ae-date-col { width: 96px; padding: 5px 8px; color: #777; white-space: nowrap; }
 .ae-btn-col  { width: 34px; padding: 4px 8px 4px 4px; text-align: center; }
 .ae-extract  { background: none; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-size: 11px; padding: 2px 5px; color: #555; }
 .ae-extract:hover { background: #e6f4ea; border-color: #5a9; color: #2a6; }
