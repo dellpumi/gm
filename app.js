@@ -1170,7 +1170,13 @@ function getEmailHtml(payload) {
     return null;
   }
 
-  // Decode base64url body data respecting the part's charset
+  // Decode base64url body data respecting the part's charset.
+  // IMPORTANT: Gmail transcodes all incoming emails to UTF-8 internally but often
+  // keeps the original charset declaration (e.g. iso-8859-2) in the API headers.
+  // Strategy: always try strict UTF-8 first. If the bytes are valid UTF-8 (they will
+  // be when Gmail has transcoded them), that is correct. Only fall through to the
+  // declared charset when UTF-8 parsing itself fails — which happens for genuinely
+  // legacy-encoded emails served by old mail servers that don't transcode.
   function decodePartBody(data, charset) {
     if (!data) return '';
     const b64 = (data || '').replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
@@ -1181,27 +1187,32 @@ function getEmailHtml(payload) {
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
-      // If no charset from headers, try to find it in the meta tags
+      // ── Step 1: strict UTF-8 ──────────────────────────────────────────────
+      // If this succeeds the bytes ARE UTF-8 (Gmail-transcoded or natively UTF-8).
+      try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (_) {}
+
+      // ── Step 2: declared or detected charset ─────────────────────────────
+      // UTF-8 failed → bytes are in a legacy single-byte encoding.
       if (!charset) charset = extractMetaCharset(bytes);
-
-      const isUtf8 = !charset || charset === 'utf-8' || charset === 'utf8';
-      if (isUtf8) {
-        return new TextDecoder('utf-8').decode(bytes);
-      }
-
-      // Try the declared charset first (e.g. iso-8859-2, windows-1250, etc.)
-      try {
-        return new TextDecoder(charset, { fatal: true }).decode(bytes);
-      } catch(e) {
-        // If the declared charset name isn't recognised by the browser, try common aliases
-        const aliases = { 'iso-8859-2': 'iso-8859-2', 'windows-1250': 'windows-1250', 'cp1250': 'windows-1250', 'latin2': 'iso-8859-2', 'windows-1252': 'windows-1252', 'cp1252': 'windows-1252', 'latin1': 'iso-8859-1', 'iso-8859-1': 'iso-8859-1' };
-        const alias = aliases[charset];
-        if (alias && alias !== charset) {
-          try { return new TextDecoder(alias, { fatal: true }).decode(bytes); } catch(e2) {}
+      if (charset) {
+        const aliases = {
+          'iso-8859-2':'iso-8859-2', 'latin2':'iso-8859-2',
+          'iso-8859-1':'iso-8859-1', 'latin1':'iso-8859-1',
+          'windows-1250':'windows-1250', 'cp1250':'windows-1250',
+          'windows-1252':'windows-1252', 'cp1252':'windows-1252',
+          'windows-1251':'windows-1251', 'cp1251':'windows-1251',
+          'koi8-r':'koi8-r',
+        };
+        const enc = aliases[charset] || charset;
+        try { return new TextDecoder(enc, { fatal: true }).decode(bytes); } catch (_) {}
+        // Try the raw declared name in case it's a valid WHATWG label not in our map
+        if (enc !== charset) {
+          try { return new TextDecoder(charset, { fatal: true }).decode(bytes); } catch (_) {}
         }
-        // Last resort: utf-8 with replacement characters
-        return new TextDecoder('utf-8').decode(bytes);
       }
+
+      // ── Step 3: last resort — UTF-8 with replacement characters ──────────
+      return new TextDecoder('utf-8').decode(bytes);
     } catch(e) {
       return decodeB64(data); // original fallback
     }
