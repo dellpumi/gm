@@ -24,7 +24,10 @@ export const State = {
   _sessionWakeListeners: null,   // set by startSessionTimer in app.js
   _sessionExpiredToastShown: false,
   _warned30min: false,           // prevents the 30-min warning from firing more than once
-  pollInterval: null             // 5-minute inbox poll timer
+  pollInterval: null,            // 10-minute inbox poll timer
+  notificationsEnabled: false,   // toggled via the bell button once permission is granted
+  notifiedEventIds: new Set(),   // event IDs we've already fired a reminder for (avoids duplicates)
+  eventNotifInterval: null       // 60-second upcoming-event check timer
 };
 
 // ── PKCE helpers ──────────────────────────────────────────────────────────────
@@ -82,22 +85,32 @@ export const Auth = {
     sessionStorage.setItem('aether_token_exp', String(exp));
   },
 
-  // ── Refresh token (persistent) ──
-  getRefreshToken: () => localStorage.getItem('aether_refresh_token'),
-  setRefreshToken: (t) => localStorage.setItem('aether_refresh_token', t),
+  // ── Refresh token ──
+  // STORED IN sessionStorage (not localStorage) — this is the key fix for "session
+  // survives browser close". sessionStorage is destroyed by the browser itself the
+  // moment the tab/window is actually closed (even on crash or force-quit), with
+  // zero reliance on our own JS event handlers firing correctly. A reload (F5, etc.)
+  // keeps the SAME tab alive, so sessionStorage — and therefore the session — survives
+  // a reload exactly as before.
+  // This also naturally supports signing in on 2-3 different devices/browsers at
+  // once: each browser/device has its own completely separate sessionStorage, so
+  // each one gets its own independent Google refresh token. Signing out on one
+  // device only revokes THAT device's token/grant — Google issues a distinct
+  // refresh token per sign-in, so other devices are entirely unaffected.
+  getRefreshToken: () => sessionStorage.getItem('aether_refresh_token'),
+  setRefreshToken: (t) => sessionStorage.setItem('aether_refresh_token', t),
 
-  // ── Login wall-clock timestamp ──
-  // Stored in localStorage so it survives page reloads but is cleared on sign-out / tab close.
-  getLoginTime:  () => parseInt(localStorage.getItem('aether_login_time') || '0'),
-  setLoginTime:  (t) => localStorage.setItem('aether_login_time', String(t)),
-  clearLoginTime:() => localStorage.removeItem('aether_login_time'),
+  // ── Login wall-clock timestamp ── (sessionStorage — see note above)
+  getLoginTime:  () => parseInt(sessionStorage.getItem('aether_login_time') || '0'),
+  setLoginTime:  (t) => sessionStorage.setItem('aether_login_time', String(t)),
+  clearLoginTime:() => sessionStorage.removeItem('aether_login_time'),
 
   // ── Time offset: (Budapest server time) − (browser Date.now()) at login ──
   // Protects against users manually advancing their system clock to extend sessions.
-  // Falls back to 0 if the API was unavailable.
-  getTimeOffset:  () => parseInt(localStorage.getItem('aether_time_offset') || '0'),
-  setTimeOffset:  (offset) => localStorage.setItem('aether_time_offset', String(offset)),
-  clearTimeOffset:() => localStorage.removeItem('aether_time_offset'),
+  // Falls back to 0 if the API was unavailable. (sessionStorage — see note above)
+  getTimeOffset:  () => parseInt(sessionStorage.getItem('aether_time_offset') || '0'),
+  setTimeOffset:  (offset) => sessionStorage.setItem('aether_time_offset', String(offset)),
+  clearTimeOffset:() => sessionStorage.removeItem('aether_time_offset'),
 
   // ── getNow: browser time corrected by the offset captured at login ──
   getNow: () => Date.now() + Auth.getTimeOffset(),
@@ -115,18 +128,18 @@ export const Auth = {
     sessionStorage.removeItem('aether_token_exp');
   },
 
-  // ── Full clear — called on explicit sign-out OR real tab/browser close ──
-  // Intentionally keeps client_id and client_secret so the user doesn't have
-  // to re-enter them on the next sign-in.
+  // ── Full clear — called on explicit sign-out or 9h expiry ──
+  // Intentionally keeps client_id and client_secret (in localStorage) so the user
+  // doesn't have to re-enter them on the next sign-in. Everything else lives in
+  // sessionStorage and is wiped here AND automatically by the browser on tab close.
   clearAll: () => {
     sessionStorage.removeItem('aether_token');
     sessionStorage.removeItem('aether_token_exp');
-    localStorage.removeItem('aether_refresh_token');
-    localStorage.removeItem('aether_pkce_verifier');
-    localStorage.removeItem('aether_pkce_state');
-    localStorage.removeItem('aether_login_time');
-    localStorage.removeItem('aether_time_offset');
-    localStorage.removeItem('aether_oauth_redirect'); // safety: never leave this stranded
+    sessionStorage.removeItem('aether_refresh_token');
+    sessionStorage.removeItem('aether_pkce_verifier');
+    sessionStorage.removeItem('aether_pkce_state');
+    sessionStorage.removeItem('aether_login_time');
+    sessionStorage.removeItem('aether_time_offset');
   },
 
   // ── check: returns true if a still-valid access token exists in this session ──
@@ -149,11 +162,6 @@ export const Auth = {
 
   // ── parseCode: exchange ?code= for tokens, then anchor the session wall-clock ──
   parseCode: async () => {
-    // Remove the OAuth redirect flag first — the DOMContentLoaded startup check
-    // reads this key to decide whether to call clearAll(). Removing it here keeps
-    // state clean even if the exchange fails.
-    localStorage.removeItem('aether_oauth_redirect');
-
     const params   = new URLSearchParams(window.location.search);
     const code     = params.get('code');
     const retState = params.get('state');
@@ -164,12 +172,16 @@ export const Auth = {
     if (errParam) return { ok: false, error: `Google denied access: ${errParam}` };
     if (!code)    return { ok: false, error: null };
 
-    const savedState = localStorage.getItem('aether_pkce_state');
+    // PKCE verifier/state live in sessionStorage now, which survives the same-tab
+    // navigation to accounts.google.com and back without any special-case flag —
+    // the browsing context (tab) never closes during an OAuth redirect, so its
+    // sessionStorage area is never destroyed.
+    const savedState = sessionStorage.getItem('aether_pkce_state');
     if (retState !== savedState) {
       return { ok: false, error: 'Security check failed (state mismatch). Please try logging in again.' };
     }
 
-    const verifier     = localStorage.getItem('aether_pkce_verifier');
+    const verifier     = sessionStorage.getItem('aether_pkce_verifier');
     const clientId     = Auth.getClientId();
     const clientSecret = Auth.getClientSecret();
     const redirectUri  = Auth.getRedirectUri();
@@ -222,8 +234,10 @@ export const Auth = {
       console.log(`[Aether] Session anchored. Budapest offset: ${offset}ms. Login time: ${new Date(nowMs + offset).toISOString()}`);
       // ─────────────────────────────────────────────────────────────────────
 
-      localStorage.removeItem('aether_pkce_verifier');
-      localStorage.removeItem('aether_pkce_state');
+      localStorage.removeItem('aether_pkce_verifier');  // legacy key cleanup (pre-migration)
+      localStorage.removeItem('aether_pkce_state');     // legacy key cleanup (pre-migration)
+      sessionStorage.removeItem('aether_pkce_verifier');
+      sessionStorage.removeItem('aether_pkce_state');
       return { ok: true };
     } catch (e) {
       return { ok: false, error: `Network error during login: ${e.message}` };
@@ -288,8 +302,12 @@ export const Auth = {
     const challenge  = base64urlEncode(await sha256(verifier));
     const oauthState = randomString(16);
 
-    localStorage.setItem('aether_pkce_verifier', verifier);
-    localStorage.setItem('aether_pkce_state',    oauthState);
+    // PKCE verifier/state go in sessionStorage. This survives the same-tab
+    // navigation to Google and back (the tab itself never closes), so unlike the
+    // old localStorage approach, no special "don't wipe me, I'm mid-redirect" flag
+    // is needed — there's nothing left in localStorage for a close-handler to race with.
+    sessionStorage.setItem('aether_pkce_verifier', verifier);
+    sessionStorage.setItem('aether_pkce_state',    oauthState);
 
     const redirectUri = Auth.getRedirectUri();
     console.log('[Aether] Starting PKCE login — redirect_uri:', redirectUri);
@@ -305,11 +323,6 @@ export const Auth = {
       access_type:           'offline',
       prompt:                'consent',
     });
-    // CRITICAL: set this flag BEFORE changing location.
-    // Setting window.location.href fires pagehide/beforeunload immediately.
-    // handlePageClose reads this flag to know it must NOT call clearAll()
-    // (which would delete the PKCE verifier + state we just stored above).
-    localStorage.setItem('aether_oauth_redirect', '1');
 
     window.location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + params;
     return true;

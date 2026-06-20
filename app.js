@@ -257,54 +257,14 @@ function encodeAddressList(str) {
 document.addEventListener('DOMContentLoaded', async () => {
   setupEventListeners();
 
-  // ── Tab-close / reload detection ─────────────────────────────────────────
-  // PRIMARY: Performance Navigation API — detects ALL reload methods (F5, Ctrl+R,
-  //   Ctrl+Shift+R, browser reload button) regardless of whether the page had focus.
-  //   navType === 'reload'        → F5 / Ctrl+R / Ctrl+Shift+R / reload button
-  //   navType === 'back_forward'  → restored from browser history (treat like reload)
-  //   navType === 'navigate'      → regular visit or tab-close + reopen
-  const navType = performance.getEntriesByType?.('navigation')?.[0]?.type ?? 'navigate';
-  const wasReloadByBrowser = (navType === 'reload' || navType === 'back_forward');
-
-  const CLOSE_TS_KEY = 'aether_close_ts';
-  const RELOAD_FLAG  = 'aether_is_reload';
-
-  const closeTs          = parseInt(localStorage.getItem(CLOSE_TS_KEY) || '0', 10);
-  // Combine Performance API (primary) with sessionStorage flag (belt-and-suspenders)
-  const wasReload        = wasReloadByBrowser || sessionStorage.getItem(RELOAD_FLAG) === '1';
-  const wasOAuthRedirect = localStorage.getItem('aether_oauth_redirect') === '1';
-
-  if (closeTs && !wasReload && !wasOAuthRedirect) {
-    // Real close (not a reload, not a Google OAuth redirect) → wipe for security
-    Auth.clearAll();
-    State.token = null;
-  }
-  sessionStorage.removeItem(RELOAD_FLAG);
-  localStorage.removeItem(CLOSE_TS_KEY);
-
-  // Belt-and-suspenders keydown listener — catches keyboard reloads for future navigations.
-  // Also handles Ctrl+Shift+R (hard reload in Chrome) where e.key is uppercase 'R'.
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'F5' ||
-        (e.ctrlKey  && (e.key === 'r' || e.key === 'R')) ||
-        (e.metaKey  && (e.key === 'r' || e.key === 'R')))
-      sessionStorage.setItem(RELOAD_FLAG, '1');
-  });
-
-  function handlePageClose() {
-    // Always record a close timestamp so the next page load can detect it.
-    localStorage.setItem(CLOSE_TS_KEY, String(Date.now()));
-    // Always use lightweight clear here — it only wipes the session-scoped access token
-    // from sessionStorage (which the browser discards on tab close anyway).
-    // The page LOAD handler uses the Performance Navigation API to determine whether
-    // this was a reload or a genuine close, and only then calls Auth.clearAll() to
-    // wipe the persistent refresh token.  Doing clearAll() here breaks reload-button
-    // and Ctrl+Shift+R because they don't fire a keydown we can intercept.
-    Auth.clear();
-    State.token = null;
-  }
-  window.addEventListener('pagehide',     handlePageClose);
-  window.addEventListener('beforeunload', handlePageClose);
+  // ── Session lifetime is now handled natively by sessionStorage ──────────────
+  // The refresh token, login timestamp, and time offset all live in sessionStorage
+  // (see api.js). The browser itself destroys that storage the moment this tab/
+  // window is actually closed — including on crash or force-quit — with zero
+  // reliance on beforeunload/pagehide firing correctly (which was never fully
+  // reliable across browsers). A reload (any method) keeps the same tab alive, so
+  // sessionStorage — and the session — survives a reload exactly as intended.
+  // No manual close-detection code is needed any more.
   window.addEventListener('offline', () => toast('You are offline. Reconnect to sync.', 'error'));
   window.addEventListener('online',  () => toast('Back online!', 'success'));
 
@@ -326,6 +286,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       await loadEmails('INBOX');
       loadAllContactsForAutocomplete();
       startInboxPoll(); // begin 10-minute background poll
+      startEventNotifications(); // begin 60-second upcoming-event check
     } catch (err) {
       if (err.message === 'SESSION_EXPIRED' || err.message === 'Session expired') {
         handleSignOut();
@@ -366,17 +327,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // ===== EVENT BINDING =====
 function setupEventListeners() {
-  // ── bfcache (back-forward cache) Ctrl+Z restore guard ─────────────────────
-  // When a user closes a tab and restores it with Ctrl+Z (or Ctrl+Shift+T),
-  // Chrome/Firefox may resurrect the page from bfcache — a frozen memory snapshot
-  // that bypasses DOMContentLoaded entirely. The beforeunload/pagehide handlers did
-  // run and wiped auth from storage, but the in-memory State.token from the snapshot
-  // is still alive. The pageshow event with persisted:true fires in this exact case.
+  // ── bfcache (back-forward cache) freshness guard ──────────────────────────
+  // When the browser restores a page from its in-memory back-forward cache
+  // (navigating Back/Forward to a frozen tab), pageshow fires with persisted:true.
+  // This is no longer a security concern (sessionStorage already governs the
+  // session's true lifetime), but a frozen tab's mail/calendar data can be stale
+  // after a long time away, so we force a clean reload to resync everything.
   window.addEventListener('pageshow', (e) => {
     if (e.persisted) {
-      // Page was restored from bfcache — auth storage was already cleared on close.
-      // Force a full page reload so the app starts fresh from storage (login screen).
-      console.warn('[Aether] bfcache restore detected — forcing reload for security.');
+      console.log('[Aether] Restored from bfcache — reloading to refresh data.');
       window.location.reload();
     }
   });
@@ -423,6 +382,51 @@ function setupEventListeners() {
   }));
 
   document.getElementById('btn-sign-out').addEventListener('click', () => confirmAction('Sign Out', 'Are you sure you want to log out? This will clear your local app cache and sever connection.', 'Yes, Sign Out', handleSignOut, true));
+
+  // ── Event reminder notifications (bell toggle) ───────────────────────────
+  const notifBtn = document.getElementById('btn-notif-toggle');
+  function refreshNotifBtnState() {
+    if (!('Notification' in window)) { notifBtn.style.display = 'none'; return; }
+    notifBtn.classList.remove('notif-on', 'notif-off', 'notif-denied');
+    if (Notification.permission === 'granted') {
+      notifBtn.classList.add('notif-on');
+      notifBtn.title = 'Event reminders are on — click to turn off';
+    } else if (Notification.permission === 'denied') {
+      notifBtn.classList.add('notif-denied');
+      notifBtn.title = 'Notifications blocked in browser settings';
+    } else {
+      notifBtn.classList.add('notif-off');
+      notifBtn.title = 'Click to enable browser notifications for upcoming events';
+    }
+  }
+  refreshNotifBtnState();
+
+  notifBtn.addEventListener('click', async () => {
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'denied') {
+      toast('Notifications are blocked. Enable them in your browser\'s site settings.', 'error');
+      return;
+    }
+    if (Notification.permission === 'granted') {
+      // Toggle OFF: we can't revoke browser permission via JS, but we can stop
+      // checking/firing reminders, which is the practical "off" the user wants.
+      State.notificationsEnabled = !State.notificationsEnabled;
+      notifBtn.classList.toggle('notif-on', State.notificationsEnabled);
+      notifBtn.classList.toggle('notif-off', !State.notificationsEnabled);
+      toast(State.notificationsEnabled ? 'Event reminders enabled' : 'Event reminders paused', 'info');
+      return;
+    }
+    // permission === 'default' → ask now (this click IS the required user gesture)
+    const result = await Notification.requestPermission();
+    refreshNotifBtnState();
+    if (result === 'granted') {
+      State.notificationsEnabled = true;
+      toast('Event reminders enabled — you\'ll get a notification 10 minutes before each event.', 'success');
+      checkUpcomingEvents(); // run one check immediately
+    } else if (result === 'denied') {
+      toast('Notifications blocked. You can re-enable them in your browser settings.', 'error');
+    }
+  });
 
   // Fix 19: Batch delete
   document.getElementById('btn-batch-delete').addEventListener('click', () => {
@@ -820,6 +824,7 @@ async function handleSignOut() {
   State.token = null;
   clearInterval(State.timerInterval);
   stopInboxPoll(); // stop background poll on sign-out
+  stopEventNotifications(); // stop event-reminder poll on sign-out
   // Clean up wake-from-sleep listeners
   if (State._sessionWakeListeners) {
     document.removeEventListener('visibilitychange', State._sessionWakeListeners);
@@ -1043,6 +1048,100 @@ function updateUnreadBadge() {
   }
 }
 
+// ── Event reminder notifications ───────────────────────────────────────────────
+// Independent of which panel (mail/calendar/contacts) is currently open — this
+// fetches a small near-term window directly from the Calendar API every 60s so
+// reminders fire even if the user never visits the Calendar panel.
+const NOTIF_LEAD_MS = 10 * 60 * 1000; // notify 10 minutes before an event starts
+
+function startEventNotifications() {
+  stopEventNotifications();
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') State.notificationsEnabled = true;
+  State.eventNotifInterval = setInterval(checkUpcomingEvents, 60 * 1000); // every 60 seconds
+  checkUpcomingEvents(); // run one check immediately on start
+}
+
+function stopEventNotifications() {
+  if (State.eventNotifInterval) {
+    clearInterval(State.eventNotifInterval);
+    State.eventNotifInterval = null;
+  }
+}
+
+async function checkUpcomingEvents() {
+  if (!State.notificationsEnabled) return;
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (!State.token) return;
+
+  try {
+    // Reuse the calendar list if the Calendar panel has already loaded it;
+    // otherwise fetch it once here (cheap, cached for subsequent checks).
+    if (!State.calendar.calendars.length) {
+      const calList = await gapi('GET', 'https://www.googleapis.com/calendar/v3/users/me/calendarList');
+      State.calendar.calendars = calList.items || [];
+    }
+
+    const now      = new Date();
+    const windowEnd = new Date(now.getTime() + NOTIF_LEAD_MS);
+
+    const calendars = State.calendar.calendars.filter(c => c.selected !== false);
+    const eventLists = await Promise.all(calendars.map(async (c) => {
+      try {
+        const data = await gapi('GET',
+          `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(c.id)}/events` +
+          `?timeMin=${now.toISOString()}&timeMax=${windowEnd.toISOString()}&singleEvents=true&orderBy=startTime&maxResults=20`
+        );
+        return (data.items || []).map(e => ({ ...e, calendarName: c.summary }));
+      } catch (_) { return []; }
+    }));
+
+    const upcoming = eventLists.flat();
+
+    for (const ev of upcoming) {
+      if (!ev.id || State.notifiedEventIds.has(ev.id)) continue;
+      if (ev.status === 'cancelled') continue;
+
+      const startStr = ev.start?.dateTime || ev.start?.date;
+      if (!startStr) continue;
+      const startMs = new Date(startStr).getTime();
+      const minsUntil = Math.round((startMs - now.getTime()) / 60000);
+
+      // Only notify once the event is within the lead window (≤10 min away,
+      // including events starting right now or that just started within 1 min).
+      if (minsUntil > 10 || minsUntil < -1) continue;
+
+      State.notifiedEventIds.add(ev.id); // mark before firing so a slow tick can't double-fire
+
+      const title = ev.summary || '(No title)';
+      const whenLabel = minsUntil <= 0 ? 'Starting now' : `Starts in ${minsUntil} min`;
+      const bodyLines = [whenLabel];
+      if (ev.location) bodyLines.push(ev.location);
+      if (ev.calendarName) bodyLines.push(ev.calendarName);
+
+      try {
+        const notif = new Notification(title, {
+          body: bodyLines.join(' · '),
+          tag: 'aether-event-' + ev.id, // de-dupes at the OS level too
+        });
+        notif.onclick = () => {
+          window.focus();
+          showPanel('calendar');
+          notif.close();
+        };
+      } catch (e) { console.warn('[Aether] Notification failed:', e.message); }
+    }
+
+    // Housekeeping: drop notified IDs for events whose start time has long passed,
+    // so the Set doesn't grow unbounded over a long session.
+    if (State.notifiedEventIds.size > 200) {
+      State.notifiedEventIds.clear();
+    }
+  } catch (e) {
+    console.warn('[Aether] Event notification check failed:', e.message);
+  }
+}
+
 async function searchEmails(query) {
   if (!query.trim()) return renderEmailList(State.mail.items, true);
   const container = document.getElementById('email-list');
@@ -1189,7 +1288,17 @@ function getEmailHtml(payload) {
 
       // ── Step 1: strict UTF-8 ──────────────────────────────────────────────
       // If this succeeds the bytes ARE UTF-8 (Gmail-transcoded or natively UTF-8).
-      try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (_) {}
+      try {
+        const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        // Safety net: even valid UTF-8 can occasionally BE a cp1252-mojibake'd
+        // string that happens to form legal UTF-8 byte sequences by coincidence
+        // (same failure mode already handled for headers via fixDoubleEncodedUtf8).
+        // Gate on the 'Ã' marker — the universal first-byte artifact of any
+        // UTF-8-as-Latin1/cp1252 misdecoding — so genuinely correct, accent-dense
+        // text (Hungarian, etc.) is never touched; 'Ã' essentially never appears
+        // in real Hungarian/English/German content otherwise.
+        return decoded.includes('Ã') ? fixDoubleEncodedUtf8(decoded) : decoded;
+      } catch (_) {}
 
       // ── Step 2: declared or detected charset ─────────────────────────────
       // UTF-8 failed → bytes are in a legacy single-byte encoding.
@@ -1999,6 +2108,52 @@ async function renderPptxSlides(bytes) {
     return null;
   }
 
+  // ── Shared paragraph/run → HTML extractor ─────────────────────────────────
+  // Used by BOTH free-floating text boxes (p:sp) AND table cells (a:tc) so
+  // font size, bold/italic/underline, colour, and alignment are handled
+  // identically everywhere text appears in the deck.
+  function extractParasHtml(txBody, fallbackSz) {
+    if (!txBody) return { html: '', hasText: false };
+    const lstDef = txBody.getElementsByTagNameNS(NS_A, 'lstStyle')[0];
+    const defSz  = parseInt(lstDef?.getElementsByTagNameNS(NS_A, 'defRPr')[0]?.getAttribute('sz') || '0');
+
+    let paraHtml = '';
+    let hasText = false;
+
+    for (const para of txBody.getElementsByTagNameNS(NS_A, 'p')) {
+      const pPr  = para.getElementsByTagNameNS(NS_A, 'pPr')[0];
+      const algn = pPr?.getAttribute('algn') || 'l';
+      const ta   = algn === 'ctr' ? 'center' : algn === 'r' ? 'right' : algn === 'just' ? 'justify' : 'left';
+
+      let spanHtml = '';
+      for (const run of para.getElementsByTagNameNS(NS_A, 'r')) {
+        const rPr = run.getElementsByTagNameNS(NS_A, 'rPr')[0];
+        const t   = run.getElementsByTagNameNS(NS_A, 't')[0];
+        const txt = t?.textContent;
+        if (!txt) continue;
+        hasText = true;
+
+        const styles = [];
+        const szRaw = rPr?.getAttribute('sz');
+        const sz = szRaw ? +szRaw : (defSz || fallbackSz || 1800);
+        styles.push('font-size:' + ptToCqw(sz));
+        if (rPr?.getAttribute('b') === '1') styles.push('font-weight:700');
+        if (rPr?.getAttribute('i') === '1') styles.push('font-style:italic');
+        const u = rPr?.getAttribute('u');
+        if (u && u !== 'none') styles.push('text-decoration:underline');
+        const sf  = rPr?.getElementsByTagNameNS(NS_A, 'solidFill')[0];
+        const clr = getHexColor(sf);
+        if (clr) styles.push('color:' + clr);
+
+        spanHtml += `<span style="${styles.join(';')}">${escHtml(txt)}</span>`;
+      }
+      if (spanHtml) {
+        paraHtml += `<div style="text-align:${ta};line-height:1.3;margin:0;">${spanHtml}</div>`;
+      }
+    }
+    return { html: paraHtml, hasText };
+  }
+
   // Media cache: zip path → base64 string
   const mediaCache = {};
   async function getMediaB64(path) {
@@ -2071,46 +2226,7 @@ async function renderPptxSlides(bytes) {
       const txBody = sp.getElementsByTagNameNS(NS_P, 'txBody')[0];
       if (!txBody) continue;
 
-      // Collect default list-level font size from <a:lstStyle> if present
-      const lstDef = txBody.getElementsByTagNameNS(NS_A, 'lstStyle')[0];
-      const defSz  = parseInt(lstDef?.getElementsByTagNameNS(NS_A, 'defRPr')[0]?.getAttribute('sz') || '0');
-
-      let paraHtml = '';
-      let hasRealText = false;
-
-      for (const para of txBody.getElementsByTagNameNS(NS_A, 'p')) {
-        const pPr  = para.getElementsByTagNameNS(NS_A, 'pPr')[0];
-        const algn = pPr?.getAttribute('algn') || 'l';
-        const ta   = algn === 'ctr' ? 'center' : algn === 'r' ? 'right' : algn === 'just' ? 'justify' : 'left';
-
-        let spanHtml = '';
-        for (const run of para.getElementsByTagNameNS(NS_A, 'r')) {
-          const rPr = run.getElementsByTagNameNS(NS_A, 'rPr')[0];
-          const t   = run.getElementsByTagNameNS(NS_A, 't')[0];
-          const txt = t?.textContent;
-          if (!txt) continue;
-          hasRealText = true;
-
-          const styles = [];
-          const szRaw = rPr?.getAttribute('sz');
-          // Use run size → list-level default → body default 1800 (18pt)
-          const sz = szRaw ? +szRaw : (defSz || 1800);
-          styles.push('font-size:' + ptToCqw(sz));
-          if (rPr?.getAttribute('b') === '1') styles.push('font-weight:700');
-          if (rPr?.getAttribute('i') === '1') styles.push('font-style:italic');
-          const u = rPr?.getAttribute('u');
-          if (u && u !== 'none') styles.push('text-decoration:underline');
-          const sf  = rPr?.getElementsByTagNameNS(NS_A, 'solidFill')[0];
-          const clr = getHexColor(sf);
-          if (clr) styles.push('color:' + clr);
-
-          spanHtml += `<span style="${styles.join(';')}">${escHtml(txt)}</span>`;
-        }
-        // Only emit the paragraph div if it has visible text
-        if (spanHtml) {
-          paraHtml += `<div style="text-align:${ta};line-height:1.3;margin:0;">${spanHtml}</div>`;
-        }
-      }
+      const { html: paraHtml, hasText: hasRealText } = extractParasHtml(txBody);
 
       // Only render the text box if there is actual text to show
       if (hasRealText && paraHtml) {
@@ -2146,6 +2262,76 @@ async function renderPptxSlides(bytes) {
       const imgMime = IMG_MIME[mediaExt] || 'image/' + mediaExt;
       inner += `<div style="position:absolute;left:${pct(x,slideW)};top:${pct(y,slideH)};width:${pct(w,slideW)};height:${pct(h,slideH)};overflow:hidden;">
         <img src="data:${imgMime};base64,${b64}" style="width:100%;height:100%;object-fit:fill;" alt="">
+      </div>`;
+    }
+
+    // ── Tables (p:graphicFrame > a:tbl) ───────────────────────────────────
+    // PowerPoint tables are NOT p:sp shapes — they live in a graphicFrame
+    // wrapping a DrawingML table (a:tbl), so they need their own extraction path.
+    for (const gf of sDoc.getElementsByTagNameNS(NS_P, 'graphicFrame')) {
+      const xfrm  = gf.getElementsByTagNameNS(NS_P, 'xfrm')[0];
+      const off   = xfrm?.getElementsByTagNameNS(NS_A, 'off')[0];
+      const extEl = xfrm?.getElementsByTagNameNS(NS_A, 'ext')[0];
+      if (!off || !extEl) continue;
+
+      const tbl = gf.getElementsByTagNameNS(NS_A, 'tbl')[0];
+      if (!tbl) continue; // graphicFrame can also hold charts/diagrams — skip those
+
+      const x = +off.getAttribute('x'), y = +off.getAttribute('y');
+      const w = +extEl.getAttribute('cx'), h = +extEl.getAttribute('cy');
+
+      // Column widths from a:tblGrid → convert to relative percentages
+      const gridCols = [...tbl.getElementsByTagNameNS(NS_A, 'gridCol')].map(g => +g.getAttribute('w') || 1);
+      const colTotal = gridCols.reduce((s, v) => s + v, 0) || 1;
+      const colPercents = gridCols.map(v => (v / colTotal * 100).toFixed(3) + '%');
+
+      const rows = [...tbl.getElementsByTagNameNS(NS_A, 'tr')];
+      const rowHeights = rows.map(r => +r.getAttribute('h') || 1);
+      const rowTotal = rowHeights.reduce((s, v) => s + v, 0) || 1;
+
+      let theadBody = '';
+      rows.forEach((tr, ri) => {
+        const cells = [...tr.getElementsByTagNameNS(NS_A, 'tc')];
+        let cellsHtml = '';
+        let colIdx = 0;
+        cells.forEach(tc => {
+          const gridSpan = parseInt(tc.getAttribute('gridSpan') || '1');
+          const isVMergeCont = tc.getAttribute('vMerge') === '1'; // continuation of a vertical merge — skip
+          const isHMergeCont = tc.getAttribute('hMerge') === '1'; // continuation of a horizontal merge — skip
+          if (isHMergeCont || isVMergeCont) { colIdx += gridSpan; return; }
+
+          const tcPr = tc.getElementsByTagNameNS(NS_A, 'tcPr')[0];
+          const fillEl = tcPr?.getElementsByTagNameNS(NS_A, 'solidFill')[0];
+          const fillColor = getHexColor(fillEl);
+          const rowSpan = parseInt(tc.getAttribute('rowSpan') || '1');
+
+          const txBody = tc.getElementsByTagNameNS(NS_A, 'txBody')[0];
+          const { html: cellHtml } = extractParasHtml(txBody, 1400); // PPT table default ≈14pt
+
+          const tdStyle = [
+            'border:1px solid rgba(0,0,0,0.25)',
+            'padding:0.3cqw 0.6cqw',
+            'vertical-align:middle',
+            'overflow:hidden',
+            fillColor ? `background:${fillColor}` : ''
+          ].filter(Boolean).join(';');
+
+          const attrs = [
+            gridSpan > 1 ? `colspan="${gridSpan}"` : '',
+            rowSpan  > 1 ? `rowspan="${rowSpan}"`  : ''
+          ].filter(Boolean).join(' ');
+
+          cellsHtml += `<td ${attrs} style="${tdStyle}">${cellHtml || '&nbsp;'}</td>`;
+          colIdx += gridSpan;
+        });
+        const rowHPct = (rowHeights[ri] / rowTotal * 100).toFixed(3) + '%';
+        theadBody += `<tr style="height:${rowHPct}">${cellsHtml}</tr>`;
+      });
+
+      const colgroupHtml = colPercents.map(p => `<col style="width:${p}">`).join('');
+
+      inner += `<div style="position:absolute;left:${pct(x,slideW)};top:${pct(y,slideH)};width:${pct(w,slideW)};height:${pct(h,slideH)};overflow:hidden;">
+        <table class="pptx-table"><colgroup>${colgroupHtml}</colgroup><tbody>${theadBody}</tbody></table>
       </div>`;
     }
 
