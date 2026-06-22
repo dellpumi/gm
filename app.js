@@ -313,10 +313,53 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
+  // ── Stale-session guard (Web Locks API) ──────────────────────────────────
+  // sessionStorage is normally destroyed the instant a tab/window genuinely
+  // closes — that's the core mechanism keeping the session honest. BUT some
+  // browsers, when configured to "continue where you left off" (or after
+  // crash-recovery), deliberately REPOPULATE a closed tab's sessionStorage as
+  // part of restoring it — this is intentional, spec-permitted browser
+  // behaviour, not a bug, and no storage API alone can tell the difference.
+  //
+  // Web Locks ARE able to tell the difference: a lock is a pure in-memory
+  // runtime construct, never written to disk and never restored by any
+  // browser feature. BUT a lock is tied to the DOCUMENT context, not the tab
+  // — and a plain reload (F5) discards and recreates that context too, which
+  // would release the lock on every single reload, not just on a genuine
+  // close+relaunch. So this check ONLY runs when the Performance Navigation
+  // API confirms this load is NOT a reload — i.e. only for the ambiguous
+  // "fresh navigate" case, where sessionStorage having leftover data is
+  // genuinely suspicious (a reload, by contrast, is unambiguous: sessionStorage
+  // survives it by definition, so there's nothing to check).
+  const navType = performance.getEntriesByType?.('navigation')?.[0]?.type ?? 'navigate';
+  if ('locks' in navigator && navType !== 'reload') {
+    try {
+      const noOtherLiveTab = await new Promise((resolve) => {
+        navigator.locks.request(
+          'aether-app-alive',
+          { mode: 'exclusive', ifAvailable: true },
+          (lock) => resolve(!!lock) // lock is null if another tab already holds it
+        );
+      });
+      if (noOtherLiveTab && (Auth.getRefreshToken() || Auth.getToken())) {
+        console.warn('[Aether] sessionStorage was repopulated by browser session-restore with no live tab present — clearing stale session.');
+        Auth.clearAll();
+      }
+    } catch (e) { console.warn('[Aether] Lock-based staleness check failed:', e.message); }
+  }
+  // Hold a SHARED lock for as long as this tab stays open (independent of the
+  // check above — every load, reload or not, should hold the lock so that a
+  // LATER tab's probe correctly sees this one as alive). Multiple tabs of this
+  // app can each hold this same shared lock concurrently without blocking one
+  // another; it's only fully released once every tab/window has closed.
+  if ('locks' in navigator) {
+    navigator.locks.request('aether-app-alive', { mode: 'shared' }, () => new Promise(() => {})).catch(() => {});
+  }
+
   // Already have a valid access token (same session)
   if (Auth.check()) { await bootApp(); return; }
 
-  // Try silent refresh with stored refresh token
+  // Try silent refresh with stored refresh token (skipped if we just wiped it above)
   const refreshed = await Auth.refresh();
   if (refreshed) { await bootApp(); return; }
 
@@ -1270,12 +1313,67 @@ function getEmailHtml(payload) {
   }
 
   // Decode base64url body data respecting the part's charset.
-  // IMPORTANT: Gmail transcodes all incoming emails to UTF-8 internally but often
-  // keeps the original charset declaration (e.g. iso-8859-2) in the API headers.
-  // Strategy: always try strict UTF-8 first. If the bytes are valid UTF-8 (they will
-  // be when Gmail has transcoded them), that is correct. Only fall through to the
-  // declared charset when UTF-8 parsing itself fails — which happens for genuinely
-  // legacy-encoded emails served by old mail servers that don't transcode.
+  // ROBUST STRATEGY: rather than guessing which single theory of Gmail's behaviour
+  // applies (transcoded-to-UTF-8-but-mislabeled vs. genuinely-legacy-encoded), try
+  // EVERY plausible decoding (UTF-8, the declared/detected charset, and the most
+  // common email charsets) and score each result for mojibake artifacts. The
+  // candidate with the fewest artifacts wins. This correctly handles BOTH known
+  // corruption families:
+  //   • UTF-8 bytes wrongly read as Windows-1252/Latin-1   → marker character 'Ã'
+  //   • UTF-8 bytes wrongly read as ISO-8859-2/Windows-1250 → marker character 'Ă'
+  // and is immune to being wrong about which one applies to a given message.
+  function garbageScore(s) {
+    if (!s) return 999;
+    let score = 0;
+    score += (s.match(/Ã/g)      || []).length * 3;  // cp1252/latin1-style mojibake marker
+    score += (s.match(/Ă/g)      || []).length * 3;  // iso-8859-2/windows-1250-style marker
+    score += (s.match(/Â/g)      || []).length * 2;  // common companion artifact
+    score += (s.match(/\uFFFD/g) || []).length * 5;   // replacement char — definitely wrong
+    score += (s.match(/[\x00-\x08\x0B\x0E-\x1F]/g) || []).length * 4; // stray control chars
+    return score;
+  }
+
+  function decodeBytesSmart(bytes, declaredCharset) {
+    const tried = new Set();
+    const candidates = [];
+
+    function tryEnc(enc) {
+      if (!enc || tried.has(enc)) return;
+      tried.add(enc);
+      try { candidates.push({ enc, text: new TextDecoder(enc, { fatal: true }).decode(bytes) }); }
+      catch (_) {}
+    }
+
+    const aliases = {
+      'iso-8859-2':'iso-8859-2', 'latin2':'iso-8859-2',
+      'iso-8859-1':'iso-8859-1', 'latin1':'iso-8859-1',
+      'windows-1250':'windows-1250', 'cp1250':'windows-1250',
+      'windows-1252':'windows-1252', 'cp1252':'windows-1252',
+      'windows-1251':'windows-1251', 'cp1251':'windows-1251',
+      'koi8-r':'koi8-r',
+    };
+
+    tryEnc('utf-8');                                            // always try first — modern default
+    if (declaredCharset) tryEnc(aliases[declaredCharset] || declaredCharset); // whatever the header says
+    tryEnc('windows-1250'); tryEnc('iso-8859-2');                // common Central-European fallbacks
+    tryEnc('windows-1252'); tryEnc('iso-8859-1');                // common Western-European fallbacks
+
+    // Also test the cp1252-double-decode reversal of the UTF-8 candidate, in case
+    // it's triple-encoded (rare, but the existing header-decode logic already
+    // handles this case, so we reuse it here for free).
+    const utf8Candidate = candidates.find(c => c.enc === 'utf-8');
+    if (utf8Candidate) {
+      const fixed = fixDoubleEncodedUtf8(utf8Candidate.text);
+      if (fixed !== utf8Candidate.text) candidates.push({ enc: 'utf-8+fix', text: fixed });
+    }
+
+    if (!candidates.length) return new TextDecoder('utf-8').decode(bytes); // last resort
+
+    candidates.forEach(c => c.score = garbageScore(c.text));
+    candidates.sort((a, b) => a.score - b.score);
+    return candidates[0].text;
+  }
+
   function decodePartBody(data, charset) {
     if (!data) return '';
     const b64 = (data || '').replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
@@ -1285,43 +1383,8 @@ function getEmailHtml(payload) {
       const bin = atob(padded);
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-
-      // ── Step 1: strict UTF-8 ──────────────────────────────────────────────
-      // If this succeeds the bytes ARE UTF-8 (Gmail-transcoded or natively UTF-8).
-      try {
-        const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-        // Safety net: even valid UTF-8 can occasionally BE a cp1252-mojibake'd
-        // string that happens to form legal UTF-8 byte sequences by coincidence
-        // (same failure mode already handled for headers via fixDoubleEncodedUtf8).
-        // Gate on the 'Ã' marker — the universal first-byte artifact of any
-        // UTF-8-as-Latin1/cp1252 misdecoding — so genuinely correct, accent-dense
-        // text (Hungarian, etc.) is never touched; 'Ã' essentially never appears
-        // in real Hungarian/English/German content otherwise.
-        return decoded.includes('Ã') ? fixDoubleEncodedUtf8(decoded) : decoded;
-      } catch (_) {}
-
-      // ── Step 2: declared or detected charset ─────────────────────────────
-      // UTF-8 failed → bytes are in a legacy single-byte encoding.
       if (!charset) charset = extractMetaCharset(bytes);
-      if (charset) {
-        const aliases = {
-          'iso-8859-2':'iso-8859-2', 'latin2':'iso-8859-2',
-          'iso-8859-1':'iso-8859-1', 'latin1':'iso-8859-1',
-          'windows-1250':'windows-1250', 'cp1250':'windows-1250',
-          'windows-1252':'windows-1252', 'cp1252':'windows-1252',
-          'windows-1251':'windows-1251', 'cp1251':'windows-1251',
-          'koi8-r':'koi8-r',
-        };
-        const enc = aliases[charset] || charset;
-        try { return new TextDecoder(enc, { fatal: true }).decode(bytes); } catch (_) {}
-        // Try the raw declared name in case it's a valid WHATWG label not in our map
-        if (enc !== charset) {
-          try { return new TextDecoder(charset, { fatal: true }).decode(bytes); } catch (_) {}
-        }
-      }
-
-      // ── Step 3: last resort — UTF-8 with replacement characters ──────────
-      return new TextDecoder('utf-8').decode(bytes);
+      return decodeBytesSmart(bytes, charset);
     } catch(e) {
       return decodeB64(data); // original fallback
     }
