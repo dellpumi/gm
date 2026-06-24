@@ -1371,6 +1371,17 @@ function getEmailHtml(payload) {
 
     candidates.forEach(c => c.score = garbageScore(c.text));
     candidates.sort((a, b) => a.score - b.score);
+
+    // Diagnostic: only logs when charset actually mattered (multiple real candidates),
+    // so this stays silent for the common, unambiguous case. Check DevTools Console
+    // (F12) for this exact line — if it never appears, the browser is running an
+    // OLD cached copy of this file, not this version.
+    if (candidates.length > 1) {
+      console.log('[Aether v4.2] body decode candidates:',
+        candidates.map(c => `${c.enc}(score:${c.score})`).join(', '),
+        '→ chose:', candidates[0].enc);
+    }
+
     return candidates[0].text;
   }
 
