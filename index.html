@@ -4,9 +4,36 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Aether — Mail · Calendar · Contacts</title>
+  <!--
+    Content-Security-Policy notes:
+    - script-src needs 'unsafe-inline' (the app uses inline onclick="" handlers
+      throughout) and 'unsafe-eval' (mammoth.js / jszip use `new Function(...)`
+      internally). This CSP is therefore not a substitute for sanitizing
+      untrusted HTML before it reaches innerHTML — that's handled separately
+      (see sanitizeHtml() in app.js) — but it still meaningfully restricts
+      where a script could load from and where it could send data.
+    - connect-src is scoped to exactly the Google API/OAuth hosts this app
+      talks to, so even a successful injection can't fetch() a stolen token
+      out to an attacker-controlled domain.
+    - frame-src is limited to blob: (the app's own sandboxed email/attachment
+      previews) — no arbitrary third-party framing.
+    - object-src/base-uri/form-action are locked down as standard hardening.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com;
+    style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+    font-src 'self' https://fonts.gstatic.com;
+    img-src 'self' data: blob: https:;
+    connect-src 'self' https://www.googleapis.com https://gmail.googleapis.com https://people.googleapis.com https://oauth2.googleapis.com;
+    frame-src blob:;
+    object-src 'none';
+    base-uri 'self';
+    form-action 'self';
+  ">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=4.2">
+  <link rel="stylesheet" href="styles.css?v=4.3">
 </head>
 <body>
 
@@ -14,7 +41,7 @@
   <div class="login-card">
     <div class="login-logo">✉️</div>
     <div class="login-title">Aether</div>
-    <div class="login-sub">GBG's all-in-one Gmail client &nbsp;·&nbsp; v4.2 · 2026.06.20</div>
+    <div class="login-sub">GBG's all-in-one Gmail client &nbsp;·&nbsp; v4.3 · 2026.06.20</div>
 
     <div class="login-fields">
       <div class="login-field">
@@ -86,7 +113,7 @@
       </div>
       <div class="topbar-actions">
         <div id="session-timer">
-          <span class="timer-version">v4.2 · 2026.06.20</span>
+          <span class="timer-version">v4.3 · 2026.06.20</span>
           <span class="timer-sep">|</span>
           <span class="timer-icon">⏱</span>
           <span id="timer-slot"     class="timer-slot">--:--</span>
@@ -289,7 +316,7 @@
 
 <div id="toast-container"></div>
 
-<script type="module" src="api.js?v=4.2"></script>
-<script type="module" src="app.js?v=4.2"></script>
+<script type="module" src="api.js?v=4.3"></script>
+<script type="module" src="app.js?v=4.3"></script>
 </body>
 </html>

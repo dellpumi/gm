@@ -589,10 +589,15 @@ function setupEventListeners() {
   document.getElementById('btn-new-event').addEventListener('click', () => openEventModal());
 
   // Fix 10: Mouse wheel on calendar changes months
+  // Debounced: a single scroll gesture fires many 'wheel' events, and calling
+  // loadCalendar() on every one of them used to spin up a pile of overlapping
+  // requests. We now just accumulate the month change and load once scrolling settles.
+  let calWheelTimer = null;
   document.getElementById('panel-calendar').addEventListener('wheel', (e) => {
     e.preventDefault();
     State.calendar.date.setMonth(State.calendar.date.getMonth() + (e.deltaY > 0 ? 1 : -1));
-    loadCalendar();
+    clearTimeout(calWheelTimer);
+    calWheelTimer = setTimeout(loadCalendar, 200);
   }, { passive: false });
   document.getElementById('btn-close-event').addEventListener('click', () => document.getElementById('event-modal').classList.remove('open'));
   document.getElementById('btn-cancel-event').addEventListener('click', () => document.getElementById('event-modal').classList.remove('open'));
@@ -786,6 +791,7 @@ function startSessionTimer() {
   // gap between consecutive 1-second ticks.  If the gap > 3 s (3× the interval),
   // the device was asleep → run an immediate expiry check.
   let lastTick = Date.now();
+  let preemptiveRefreshFiredFor = null; // tokenExp value we've already pre-emptively refreshed for
 
   State.timerInterval = setInterval(async () => {
     const now     = Date.now();
@@ -813,8 +819,13 @@ function startSessionTimer() {
       if (!ok) { handleSignOut(); return; }
     }
 
-    // ── Pre-emptive refresh at ~5 min remaining on current token ─────────────
-    if (tokenRemainMs > 0 && tokenRemainMs < 300000 && tokenRemainMs > 295000) {
+    // ── Pre-emptive refresh once remaining time drops under 5 min ────────────
+    // Tracks which token expiry we've already fired for (instead of a narrow
+    // "295000-300000ms" window) — a throttled/backgrounded tab can skip individual
+    // 1s ticks and miss a fixed window entirely, but it can't miss "< 5 min and
+    // haven't refreshed this token yet".
+    if (tokenRemainMs > 0 && tokenRemainMs < 300000 && preemptiveRefreshFiredFor !== tokenExp) {
+      preemptiveRefreshFiredFor = tokenExp;
       Auth.refresh().catch(() => {});
     }
 
@@ -963,6 +974,7 @@ async function loadEmails(label, loadMore = false) {
     State.mail.items = [...State.mail.items, ...newMsgs];
     renderEmailList(newMsgs, !loadMore);
     if (State.mail.pageToken) btnMore.style.display = 'block';
+    updateUnreadBadge(); // keep the inbox badge in sync after every load/load-more
 
   } catch (err) { toast(`Failed to load mail: ${err.message}`, 'error'); }
   State.mail.isFetching = false;
@@ -976,6 +988,7 @@ async function pollInbox() {
   if (State.currentPanel !== 'mail') return;
   if (State.mail.isFetching)         return;
   if (!State.token)                  return;
+  if (document.hidden)               return; // tab is backgrounded — don't spend quota polling unseen
 
   try {
     const label   = State.mail.label;
@@ -1070,6 +1083,13 @@ async function pollInbox() {
 function startInboxPoll() {
   stopInboxPoll();
   State.pollInterval = setInterval(pollInbox, 10 * 60 * 1000); // every 10 minutes
+  document.addEventListener('visibilitychange', onInboxPollVisibilityChange);
+}
+
+function onInboxPollVisibilityChange() {
+  // pollInbox() now no-ops while document.hidden; catch up right away on return
+  // instead of waiting for the next 10-minute tick.
+  if (!document.hidden) pollInbox();
 }
 
 function stopInboxPoll() {
@@ -1077,6 +1097,7 @@ function stopInboxPoll() {
     clearInterval(State.pollInterval);
     State.pollInterval = null;
   }
+  document.removeEventListener('visibilitychange', onInboxPollVisibilityChange);
 }
 
 function updateUnreadBadge() {
@@ -1284,6 +1305,15 @@ async function openEmail(msgMeta, elNode) {
     if (msg.labelIds?.includes('UNREAD')) {
       gapi('POST', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msgMeta.id}/modify`, { removeLabelIds:['UNREAD'] }).catch(()=>{});
       elNode.classList.remove('unread');
+      // Update the in-memory labelIds so the badge count stays accurate
+      const idx = State.mail.items.findIndex(m => m.id === msgMeta.id);
+      if (idx !== -1) {
+        State.mail.items[idx] = {
+          ...State.mail.items[idx],
+          labelIds: (State.mail.items[idx].labelIds || []).filter(l => l !== 'UNREAD')
+        };
+      }
+      updateUnreadBadge();
     }
   } catch (err) { toast(err.message, 'error'); }
 }
@@ -1493,6 +1523,10 @@ function getAttachmentsAndInlines(payload) {
 
 async function renderEmail(msg) {
   const viewer = document.getElementById('email-viewer');
+  // The previous email's body iframe (if any) holds a blob: URL that's about to
+  // become unreachable once we wipe innerHTML below — revoke it now, or it leaks
+  // for the rest of the session (every email opened would add another).
+  viewer.querySelectorAll('iframe').forEach(f => { if (f._blobUrl) URL.revokeObjectURL(f._blobUrl); });
   viewer.innerHTML = ''; 
   
   const headers = {};
@@ -1713,9 +1747,17 @@ let cleanHtml = htmlData;
 
   function loadIframeHtml(iframe, html) {
     const prev = iframe._blobUrl;
-    // Include a permissive meta so the iframe can load external images
-    const fullHtml = html.includes('<!DOCTYPE') ? html : '<!DOCTYPE html>' + html;
-    const blob = new Blob([fullHtml], { type: 'text/html' });
+    // CRITICAL ENCODING FIX: By the time we get here, `html` is already a correct
+    // Unicode JavaScript string — decodeBytesSmart() decoded it properly. When we
+    // pass a JS string to new Blob(), the browser ALWAYS encodes it to UTF-8 bytes.
+    // But if the original email HTML still contains <meta charset="iso-8859-2">,
+    // the browser will read that tag inside the blob URL iframe and RE-DECODE the
+    // UTF-8 bytes as iso-8859-2 — producing exactly the "GĂĄbor / KĂśszĂśnjĂźk"
+    // corruption the user sees. Fix: replace every charset declaration with utf-8
+    // before creating the blob, so the browser reads the bytes correctly.
+    const fixedHtml = html.replace(/\bcharset=["']?[\w-]+["']?/gi, 'charset="utf-8"');
+    const fullHtml = fixedHtml.includes('<!DOCTYPE') ? fixedHtml : '<!DOCTYPE html>' + fixedHtml;
+    const blob = new Blob([fullHtml], { type: 'text/html; charset=utf-8' });
     const url = URL.createObjectURL(blob);
     iframe._blobUrl = url;
     iframe.src = url;
@@ -1724,7 +1766,14 @@ let cleanHtml = htmlData;
 
   const bodyContainer = el('div', 'email-body');
   if (bodyObj.type === 'text/html') {
+    // Untrusted sender HTML lives here. No allow-scripts, no allow-same-origin:
+    // this keeps the frame at an opaque origin with script execution fully
+    // disabled, so nothing in the email body can touch this app's session/token
+    // even if it contains a <script> or an onerror/onload handler.
+    // allow-popups(-to-escape-sandbox) is only there so a normal link still opens
+    // a real, unsandboxed tab instead of being silently blocked.
     const iframe = el('iframe', '', '', {
+      sandbox: 'allow-popups allow-popups-to-escape-sandbox',
       style: 'width:100%; min-height:300px; height:600px; border:1px solid var(--border); background:#fff; border-radius:8px; flex-shrink:0;'
     });
     loadIframeHtml(iframe, safeHtml);
@@ -1888,22 +1937,59 @@ async function downloadAttachment(msgId, attId, filename, inlineData, mimeType) 
     const arr = new Uint8Array(bytes.length);
     for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
     const blob = new Blob([arr], { type: mimeType || 'application/octet-stream' });
+    const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
+    a.href = blobUrl;
     a.download = filename;
     a.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 5000); // let the download start before freeing it
   } catch(e) { 
     toast('Error downloading attachment', 'error'); 
     console.error("Attachment Download Error:", e);
   }
 }
 
+// ── HTML sanitization (DOMPurify) ─────────────────────────────────────────────
+// Untrusted HTML — email bodies, forwarded/quoted content, docx previews — must
+// never be handed to .innerHTML in the main document unsanitized: a malicious
+// sender could embed a <script> or an onerror/onload handler and have it run
+// with full access to this app (including the session's OAuth token). The
+// email-preview iframe is separately sandboxed (see renderEmail) as a second
+// layer, but the reply/forward/docx paths inject directly into the live page,
+// so sanitization there is the only thing standing between a crafted email and
+// arbitrary script execution.
+const DOMPURIFY_URL = 'https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.4.11/purify.min.js';
+const DOMPURIFY_SRI = 'sha384-o44XUELLEnv/iSlA1NWxBweqbD4TSR0qgq2VzVsxtkHS989JJjGKSE9vkfo5MN4K';
+let domPurifyLoadPromise = null;
+function ensureDomPurify() {
+  if (window.DOMPurify) return Promise.resolve();
+  if (!domPurifyLoadPromise) domPurifyLoadPromise = loadScript(DOMPURIFY_URL, DOMPURIFY_SRI);
+  return domPurifyLoadPromise;
+}
+async function sanitizeHtml(dirty) {
+  if (!dirty) return '';
+  try {
+    await ensureDomPurify();
+    // Default DOMPurify profile already strips <script>, event-handler attributes
+    // (onerror, onload, ...), javascript: URLs, and sanitizes style content — while
+    // keeping normal formatting (colors, fonts, layout) intact, which matters for
+    // an email client where forwarded/quoted content should still look right.
+    return DOMPurify.sanitize(dirty, { ADD_ATTR: ['target'] }); // preserve target="_blank" on links
+  } catch (e) {
+    // If the sanitizer itself fails to load (offline, CDN blocked, etc.), fail
+    // closed: better to show plain escaped text than risk unsanitized HTML.
+    console.warn('[Aether] DOMPurify unavailable, falling back to escaped text:', e.message);
+    return escHtml(dirty.replace(/<[^>]*>/g, ''));
+  }
+}
+
 // ── File preview modal: PDF (iframe), DOCX (mammoth.js), XLSX (SheetJS) ──────
-function loadScript(src) {
+function loadScript(src, integrity) {
   return new Promise((resolve, reject) => {
     if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
     const s = document.createElement('script');
     s.src = src;
+    if (integrity) { s.integrity = integrity; s.crossOrigin = 'anonymous'; }
     s.onload = resolve;
     s.onerror = () => reject(new Error('Failed to load: ' + src));
     document.head.appendChild(s);
@@ -1948,7 +2034,10 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
 
     // ── PDF ──────────────────────────────────────────────────────────────────
     if (ext === 'pdf' || mime === 'application/pdf') {
-      bodyEl.innerHTML = `<iframe src="${makeBlobUrl('application/pdf')}#view=FitH" style="width:100%;height:100%;border:none;"></iframe>`;
+      // Sandboxed for the same reason as the HTML preview below: a PDF someone sent
+      // us can carry embedded JavaScript actions, and the built-in viewer still runs
+      // inside this iframe's origin unless we lock it down.
+      bodyEl.innerHTML = `<iframe src="${makeBlobUrl('application/pdf')}#view=FitH" sandbox="allow-popups allow-popups-to-escape-sandbox" style="width:100%;height:100%;border:none;"></iframe>`;
 
     // ── Images ───────────────────────────────────────────────────────────────
     } else if (['jpg','jpeg','png','gif','webp','svg','bmp','ico','tiff','tif'].includes(ext) || mime.startsWith('image/')) {
@@ -1980,11 +2069,15 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
 
     // ── HTML ──────────────────────────────────────────────────────────────────
     } else if (['html','htm'].includes(ext) || mime === 'text/html') {
-      bodyEl.innerHTML = `<iframe src="${makeBlobUrl('text/html')}" sandbox="allow-same-origin allow-scripts" style="width:100%;height:100%;border:none;"></iframe>`;
+      // No allow-scripts + no allow-same-origin: this renders an arbitrary attachment
+      // someone sent us. allow-popups(-to-escape-sandbox) keeps normal links clickable
+      // (opening in a real, unsandboxed tab) without ever letting the file's own script
+      // run or reach this app's origin/session storage.
+      bodyEl.innerHTML = `<iframe src="${makeBlobUrl('text/html')}" sandbox="allow-popups allow-popups-to-escape-sandbox" style="width:100%;height:100%;border:none;"></iframe>`;
 
     // ── DOCX / DOCM ───────────────────────────────────────────────────────────
     } else if (['docx','docm'].includes(ext) || mime.includes('wordprocessingml')) {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js');
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js', 'sha384-nFoSjZIoH3CCp8W639jJyQkuPHinJ2NHe7on1xvlUA7SuGfJAfvMldrsoAVm6ECz');
       const options = {
         convertImage: mammoth.images.imgElement(img =>
           img.read('base64').then(data => ({ src: 'data:' + img.contentType + ';base64,' + data }))
@@ -2001,11 +2094,11 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
         ]
       };
       const result = await mammoth.convertToHtml({ arrayBuffer: bytes.buffer }, options);
-      bodyEl.innerHTML = `<div class="file-preview-content docx-content">${result.value}</div>`;
+      bodyEl.innerHTML = `<div class="file-preview-content docx-content">${await sanitizeHtml(result.value)}</div>`;
 
     // ── XLSX / XLS / XLSM ────────────────────────────────────────────────────
     } else if (['xlsx','xls','xlsm'].includes(ext) || mime.includes('spreadsheetml') || mime.includes('ms-excel')) {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js', 'sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw');
       window._xlsxWb = XLSX.read(bytes, { type: 'array' });
       const wb = window._xlsxWb;
       const sheetTabs = wb.SheetNames.length > 1
@@ -2021,13 +2114,13 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
 
     // ── PPTX — full positioned canvas renderer with images ───────────────────
     } else if (ext === 'pptx' || mime.includes('presentationml.presentation')) {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', 'sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG');
       const slidesHtml = await renderPptxSlides(bytes);
       bodyEl.innerHTML = `<div class="file-preview-content pptx-content">${slidesHtml}</div>`;
 
     // ── ZIP — list contents with per-file extract ─────────────────────────────
     } else if (['zip'].includes(ext) || mime === 'application/zip' || mime === 'application/x-zip-compressed') {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', 'sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG');
       const zip = await JSZip.loadAsync(bytes.buffer);
 
       const entries = [];
@@ -2421,7 +2514,7 @@ async function renderPptxSlides(bytes) {
   return allHtml || '<div class="file-preview-unsupported">No slides found in this presentation.</div>';
 }
 
-function toggleReply(forceClose = false) {
+async function toggleReply(forceClose = false) {
   const replyEd = document.getElementById('reply-editor');
   const willOpen = forceClose ? false : !replyEd.classList.contains('open');
   
@@ -2443,7 +2536,10 @@ function toggleReply(forceClose = false) {
     State.reply.attachments =[];
     renderAttachmentChips('reply');
     
-    const historyHtml = `<br><br><div class="gmail_quote">On ${formatTimestamp(State.reply.originalDate)}, ${escHtml(State.reply.originalFrom)} wrote:<br><blockquote style="margin:0 0 0 .8ex;border-left:1px #ccc solid;padding-left:1ex">${State.reply.originalHtml}</blockquote></div>`;
+    // The quoted original is the sender's raw HTML — sanitize before it ever
+    // touches .innerHTML on this live page (see sanitizeHtml() for why).
+    const safeOriginal = await sanitizeHtml(State.reply.originalHtml);
+    const historyHtml = `<br><br><div class="gmail_quote">On ${formatTimestamp(State.reply.originalDate)}, ${escHtml(State.reply.originalFrom)} wrote:<br><blockquote style="margin:0 0 0 .8ex;border-left:1px #ccc solid;padding-left:1ex">${safeOriginal}</blockquote></div>`;
     const replyBody = document.getElementById('reply-body');
     replyBody.innerHTML = `<div><br></div>${historyHtml}`;
     
@@ -2480,14 +2576,16 @@ async function sendReply() {
   } catch (e) { toast('Failed to send reply: ' + e.message, 'error'); }
 }
 
-function openComposeModal(to='', subj='', bodyHtml='', title='New Message', keepAttachments=false) {
+async function openComposeModal(to='', subj='', bodyHtml='', title='New Message', keepAttachments=false) {
   document.getElementById('compose-modal').classList.add('open');
   document.getElementById('compose-title').textContent = title;
   document.getElementById('compose-to').value = to;
   document.getElementById('compose-cc').value  = '';
   document.getElementById('compose-bcc').value = '';
   document.getElementById('compose-subject').value = subj;
-  document.getElementById('compose-body-text').innerHTML = bodyHtml;
+  // bodyHtml can be raw forwarded sender HTML (see the Forward action) — sanitize
+  // before it ever reaches .innerHTML on this live page.
+  document.getElementById('compose-body-text').innerHTML = await sanitizeHtml(bodyHtml);
   if (!keepAttachments) State.compose.attachments = [];
   renderAttachmentChips('compose');
 }
@@ -2612,9 +2710,19 @@ async function sendRawEmail(to, cc, bcc, subject, htmlBody, attachments, threadI
 }
 
 // ===== CALENDAR =====
+// Guards against overlapping loadCalendar() calls. Each call stamps itself with the
+// current token; if a NEWER call starts before an OLDER one's requests resolve, the
+// older call's (now-stale) response is discarded instead of overwriting fresher data.
+// Without this, refresh clicks, post-save reloads, and mouse-wheel month changes could
+// race, and whichever response happened to land last — not the one requested last —
+// silently won, making refresh look like it did nothing.
+let calendarLoadToken = 0;
+
 async function loadCalendar() {
+  const myToken = ++calendarLoadToken;
   try {
     const calList = await gapi('GET', 'https://www.googleapis.com/calendar/v3/users/me/calendarList');
+    if (myToken !== calendarLoadToken) return; // superseded by a newer refresh
     State.calendar.calendars = calList.items ||[];
     
     // Fix 12: Rebuild the calendar select properly each time
@@ -2647,7 +2755,7 @@ async function loadCalendar() {
         legendContainer.appendChild(item);
       });
     }
-  } catch (err) { toast('Error loading calendar list', 'error'); return; }
+  } catch (err) { if (myToken === calendarLoadToken) toast('Error loading calendar list', 'error'); return; }
 
   renderCalendarGrid();
   // Expand query range by one week on each side to catch multi-day events that start before / end after the visible month
@@ -2665,9 +2773,10 @@ async function loadCalendar() {
     });
 
     const allEventsArrays = await Promise.all(eventPromises);
+    if (myToken !== calendarLoadToken) return; // a newer refresh already resolved — don't clobber it with stale data
     State.calendar.events = allEventsArrays.flat();
     renderCalendarGrid(); 
-  } catch (err) { toast('Error loading calendar events', 'error'); }
+  } catch (err) { if (myToken === calendarLoadToken) toast('Error loading calendar events', 'error'); }
 }
 
 function searchCalendar(q) {
@@ -3038,7 +3147,10 @@ async function deleteEvent() {
 }
 
 // ===== CONTACTS =====
+let contactsLoadToken = 0; // same race-prevention pattern as calendarLoadToken
+
 async function loadContacts(loadMore = false) {
+  const myToken = ++contactsLoadToken;
   const container = document.getElementById('contacts-list');
   if (!loadMore) {
     container.innerHTML = '';
@@ -3059,6 +3171,7 @@ async function loadContacts(loadMore = false) {
         const data = await gapi('GET',
           `https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations,birthdays,biographies&pageSize=100${pageParam}`
         );
+        if (myToken !== contactsLoadToken) return; // superseded by a newer load — stop paging stale data in
         const batch = data.connections || [];
         State.contacts.allItems  = [...(State.contacts.allItems  || []), ...batch];
         State.contacts.items     = State.contacts.allItems;
@@ -3066,11 +3179,12 @@ async function loadContacts(loadMore = false) {
         totalLoaded += batch.length;
       } while (pageToken && totalLoaded < 500);
 
+      if (myToken !== contactsLoadToken) return;
       State.contacts.pageToken = pageToken; // leftover for "Load More" if > 500
       renderContactsList(State.contacts.items, true);
       document.getElementById('btn-load-more-contacts').style.display =
         State.contacts.pageToken ? 'block' : 'none';
-    } catch (err) { toast('Error loading contacts', 'error'); }
+    } catch (err) { if (myToken === contactsLoadToken) toast('Error loading contacts', 'error'); }
     return;
   }
 
@@ -3080,6 +3194,7 @@ async function loadContacts(loadMore = false) {
     const data = await gapi('GET',
       `https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations,birthdays,biographies&pageSize=100${pageParam}`
     );
+    if (myToken !== contactsLoadToken) return;
     State.contacts.pageToken = data.nextPageToken || null;
     const items = data.connections || [];
     State.contacts.allItems = [...(State.contacts.allItems || []), ...items];
@@ -3087,7 +3202,7 @@ async function loadContacts(loadMore = false) {
     renderContactsList(State.contacts.items, false);
     document.getElementById('btn-load-more-contacts').style.display =
       State.contacts.pageToken ? 'block' : 'none';
-  } catch (err) { toast('Error loading contacts', 'error'); }
+  } catch (err) { if (myToken === contactsLoadToken) toast('Error loading contacts', 'error'); }
 }
 
 function filterContacts(q) {

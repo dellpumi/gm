@@ -245,7 +245,18 @@ export const Auth = {
   },
 
   // ── refresh: silently get a new access token using the stored refresh token ──
+  // Guarded by _refreshInFlight: mail/calendar can fire dozens of gapi() calls at
+  // once, and each independently checks "is my token expiring soon?" — without this,
+  // all of them would kick off their own simultaneous POST to Google's token endpoint
+  // the moment the token nears expiry. Callers now share a single in-flight refresh.
+  _refreshInFlight: null,
   refresh: async () => {
+    if (Auth._refreshInFlight) return Auth._refreshInFlight;
+    Auth._refreshInFlight = Auth._doRefresh().finally(() => { Auth._refreshInFlight = null; });
+    return Auth._refreshInFlight;
+  },
+
+  _doRefresh: async () => {
     // Do not refresh if the 9-hour wall-clock limit has already been reached.
     if (Auth.isSessionExpired()) {
       console.warn('[Aether] 9-hour session limit reached. Refresh blocked.');
@@ -347,7 +358,10 @@ export async function gapi(method, url, body = null, isFormData = false, retries
   const controller = new AbortController();
   const timeoutId  = setTimeout(() => controller.abort(), 15000);
 
-  const opts = { method, headers: { Authorization: `Bearer ${State.token}` }, signal: controller.signal };
+  // no-store: refresh/reload calls repeat the exact same URL (e.g. the same month's
+  // calendar events query), so we must never let the browser satisfy that from its
+  // HTTP cache instead of hitting the network for genuinely current data.
+  const opts = { method, headers: { Authorization: `Bearer ${State.token}` }, signal: controller.signal, cache: 'no-store' };
   if (body && !isFormData) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   else if (isFormData)     { opts.body = body; }
 
