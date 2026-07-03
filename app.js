@@ -285,7 +285,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       await loadUserInfo();
       await loadEmails('INBOX');
       loadAllContactsForAutocomplete();
-      startInboxPoll(); // begin 10-minute background poll
+      startInboxPoll();     // begin 10-minute background poll for mail
+      startCalendarPoll();  // begin 10-minute background poll for calendar
+      startContactsPoll();  // begin 10-minute background poll for contacts
       startEventNotifications(); // begin 60-second upcoming-event check
     } catch (err) {
       if (err.message === 'SESSION_EXPIRED' || err.message === 'Session expired') {
@@ -877,7 +879,9 @@ async function handleSignOut() {
   Auth.clearAll();
   State.token = null;
   clearInterval(State.timerInterval);
-  stopInboxPoll(); // stop background poll on sign-out
+  stopInboxPoll();     // stop background poll on sign-out
+  stopCalendarPoll();  // stop background poll on sign-out
+  stopContactsPoll();  // stop background poll on sign-out
   stopEventNotifications(); // stop event-reminder poll on sign-out
   // Clean up wake-from-sleep listeners
   if (State._sessionWakeListeners) {
@@ -1098,6 +1102,81 @@ function stopInboxPoll() {
     State.pollInterval = null;
   }
   document.removeEventListener('visibilitychange', onInboxPollVisibilityChange);
+}
+
+// ── Calendar: same 10-minute background refresh pattern as mail ──────────────
+async function pollCalendar() {
+  if (State.currentPanel !== 'calendar') return; // only refresh what's actually on screen
+  if (!State.token)                      return;
+  if (document.hidden)                   return; // tab is backgrounded — don't spend quota polling unseen
+
+  try {
+    await loadCalendar(); // already guarded against overlapping/stale calls via calendarLoadToken
+    // loadCalendar's final render always shows the unfiltered month — if the user
+    // has an active search typed in, re-apply it so the poll doesn't silently
+    // revert a filtered view while the search box still shows their query.
+    const searchBox = document.getElementById('search-input');
+    if (searchBox && searchBox.value.trim()) searchCalendar(searchBox.value);
+  } catch (e) {
+    // Silent failure — polls are background work, don't alarm the user
+    console.warn('[Aether] Calendar poll failed:', e.message);
+  }
+}
+
+function startCalendarPoll() {
+  stopCalendarPoll();
+  State.calendarPollInterval = setInterval(pollCalendar, 10 * 60 * 1000); // every 10 minutes
+  document.addEventListener('visibilitychange', onCalendarPollVisibilityChange);
+}
+
+function onCalendarPollVisibilityChange() {
+  if (!document.hidden) pollCalendar();
+}
+
+function stopCalendarPoll() {
+  if (State.calendarPollInterval) {
+    clearInterval(State.calendarPollInterval);
+    State.calendarPollInterval = null;
+  }
+  document.removeEventListener('visibilitychange', onCalendarPollVisibilityChange);
+}
+
+// ── Contacts: same 10-minute background refresh pattern as mail ──────────────
+async function pollContacts() {
+  if (State.currentPanel !== 'contacts') return; // only refresh what's actually on screen
+  if (!State.token)                      return;
+  if (document.hidden)                   return; // tab is backgrounded — don't spend quota polling unseen
+
+  try {
+    // silent=true: refresh the data without wiping the list to a spinner or
+    // closing a contact detail the user might currently have open.
+    await loadContacts(false, true);
+    // loadContacts always re-renders the FULL list — if the user has an active
+    // search typed in, re-apply it so the poll doesn't silently revert a filtered
+    // view back to "everyone" while the search box still shows their query.
+    const searchBox = document.getElementById('contact-search');
+    if (searchBox && searchBox.value.trim()) filterContacts(searchBox.value);
+  } catch (e) {
+    console.warn('[Aether] Contacts poll failed:', e.message);
+  }
+}
+
+function startContactsPoll() {
+  stopContactsPoll();
+  State.contactsPollInterval = setInterval(pollContacts, 10 * 60 * 1000); // every 10 minutes
+  document.addEventListener('visibilitychange', onContactsPollVisibilityChange);
+}
+
+function onContactsPollVisibilityChange() {
+  if (!document.hidden) pollContacts();
+}
+
+function stopContactsPoll() {
+  if (State.contactsPollInterval) {
+    clearInterval(State.contactsPollInterval);
+    State.contactsPollInterval = null;
+  }
+  document.removeEventListener('visibilitychange', onContactsPollVisibilityChange);
 }
 
 function updateUnreadBadge() {
@@ -3149,42 +3228,52 @@ async function deleteEvent() {
 // ===== CONTACTS =====
 let contactsLoadToken = 0; // same race-prevention pattern as calendarLoadToken
 
-async function loadContacts(loadMore = false) {
+async function loadContacts(loadMore = false, silent = false) {
   const myToken = ++contactsLoadToken;
   const container = document.getElementById('contacts-list');
   if (!loadMore) {
-    container.innerHTML = '';
+    if (!silent) {
+      container.innerHTML = '';
+      loadingState(container);
+      document.getElementById('contact-detail-panel').classList.remove('open');
+      document.getElementById('contact-viewer').style.display = 'none';
+      document.getElementById('contact-detail-empty').style.display = 'flex';
+    }
     State.contacts.pageToken = null;
-    State.contacts.allItems  = [];   // full unfiltered set for searching
-    loadingState(container);
-    document.getElementById('contact-detail-panel').classList.remove('open');
-    document.getElementById('contact-viewer').style.display = 'none';
-    document.getElementById('contact-detail-empty').style.display = 'flex';
 
     // Load ALL pages up-front (capped at 500) so the filter always searches
-    // the full list, not just the first batch.
+    // the full list, not just the first batch. Accumulated into a local array
+    // rather than State directly: for a silent background refresh this means the
+    // visible list (and any contact detail the user has open) stays untouched
+    // until the fresh data is ready to swap in all at once, instead of flashing
+    // empty mid-fetch.
     try {
       let pageToken = null;
       let totalLoaded = 0;
+      let freshItems = [];
       do {
         const pageParam = pageToken ? `&pageToken=${pageToken}` : '';
         const data = await gapi('GET',
           `https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations,birthdays,biographies&pageSize=100${pageParam}`
         );
         if (myToken !== contactsLoadToken) return; // superseded by a newer load — stop paging stale data in
-        const batch = data.connections || [];
-        State.contacts.allItems  = [...(State.contacts.allItems  || []), ...batch];
-        State.contacts.items     = State.contacts.allItems;
+        freshItems = [...freshItems, ...(data.connections || [])];
         pageToken = data.nextPageToken || null;
-        totalLoaded += batch.length;
+        totalLoaded = freshItems.length;
       } while (pageToken && totalLoaded < 500);
 
       if (myToken !== contactsLoadToken) return;
+      State.contacts.allItems  = freshItems;   // full unfiltered set for searching
+      State.contacts.items     = freshItems;
       State.contacts.pageToken = pageToken; // leftover for "Load More" if > 500
       renderContactsList(State.contacts.items, true);
       document.getElementById('btn-load-more-contacts').style.display =
         State.contacts.pageToken ? 'block' : 'none';
-    } catch (err) { if (myToken === contactsLoadToken) toast('Error loading contacts', 'error'); }
+    } catch (err) {
+      // Background polls fail silently, same as mail's poll — don't alarm the user
+      // over a routine refresh; a manual refresh/reload will surface a real problem.
+      if (myToken === contactsLoadToken && !silent) toast('Error loading contacts', 'error');
+    }
     return;
   }
 
@@ -3202,7 +3291,7 @@ async function loadContacts(loadMore = false) {
     renderContactsList(State.contacts.items, false);
     document.getElementById('btn-load-more-contacts').style.display =
       State.contacts.pageToken ? 'block' : 'none';
-  } catch (err) { if (myToken === contactsLoadToken) toast('Error loading contacts', 'error'); }
+  } catch (err) { if (myToken === contactsLoadToken && !silent) toast('Error loading contacts', 'error'); }
 }
 
 function filterContacts(q) {

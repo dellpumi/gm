@@ -24,7 +24,9 @@ export const State = {
   _sessionWakeListeners: null,   // set by startSessionTimer in app.js
   _sessionExpiredToastShown: false,
   _warned30min: false,           // prevents the 30-min warning from firing more than once
-  pollInterval: null,            // 10-minute inbox poll timer
+  pollInterval: null,            // 10-minute mail poll timer
+  calendarPollInterval: null,    // 10-minute calendar poll timer
+  contactsPollInterval: null,    // 10-minute contacts poll timer
   notificationsEnabled: false,   // toggled via the bell button once permission is granted
   notifiedEventIds: new Set(),   // event IDs we've already fired a reminder for (avoids duplicates)
   eventNotifInterval: null       // 60-second upcoming-event check timer
