@@ -1947,16 +1947,6 @@ let cleanHtml = htmlData;
     finally { btnStar.disabled = false; }
   };
   
-  const btnArchive = el('button', 'action-btn', '📦 Archive');
-  btnArchive.onclick = async () => {
-    const origText = btnArchive.textContent;
-    btnArchive.disabled = true; btnArchive.textContent = 'Wait...';
-    try {
-      await gapi('POST', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/modify`, { removeLabelIds:['INBOX'] });
-      toast('Archived successfully', 'success'); refreshCurrent();
-    } catch(e) { toast('Failed to archive: ' + e.message, 'error'); btnArchive.textContent = origText; btnArchive.disabled = false; }
-  };
-  
   const btnUnread = el('button', 'action-btn', '✉ Mark Unread');
   btnUnread.onclick = async () => {
     const origText = btnUnread.textContent;
@@ -1984,7 +1974,7 @@ let cleanHtml = htmlData;
     } catch(e) { toast('Failed to delete: ' + e.message, 'error'); btnTrash.textContent = origText; btnTrash.disabled = false; }
   }, true);
   
-  actionBar.append(btnReply, btnFwd, btnStar, btnArchive, btnUnread, btnTrash);
+  actionBar.append(btnReply, btnFwd, btnStar, btnUnread, btnTrash);
   actionBar.style.display = 'flex';
   document.getElementById('reply-section').style.display = 'block';
 }
