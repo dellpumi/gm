@@ -72,7 +72,7 @@
 
     <div class="sidebar-section">
       <div class="sidebar-label">Mail</div>
-      <div class="nav-item active" data-panel="mail" data-label="INBOX" id="nav-inbox"><span>📥</span> Inbox <span class="badge" id="unread-badge" style="display:none" title="Unread">0</span> <span class="badge-label">Unread</span></div>
+      <div class="nav-item active" data-panel="mail" data-label="INBOX" id="nav-inbox"><span>📥</span> Inbox <span class="badge" id="unread-badge" style="display:none">0</span><span id="unread-badge-label" class="badge-label" style="display:none"> unread</span></div>
       <div class="nav-item" data-panel="mail" data-label="SENT"><span>📤</span> Sent/Forwarded</div>
       <div class="nav-item" data-panel="mail" data-label="STARRED"><span>⭐</span> Starred</div>
       <div class="nav-item" data-panel="mail" data-label="DRAFT"><span>📝</span> Drafts</div>
@@ -180,7 +180,7 @@
 
       <div class="panel" id="panel-contacts">
         <div id="contacts-list-panel" class="list-pane">
-          <div class="list-header"><input type="text" id="contact-search" placeholder="Filter contacts…" style="width:100%; background:none; border:none; color:var(--text); outline:none;"></div>
+          <div class="list-header"><input type="text" id="contact-search" placeholder="Filter contacts…" style="flex:1; background:none; border:none; color:var(--text); outline:none;"><button id="btn-new-contact" class="new-contact-btn">＋ New</button></div>
           <div id="contacts-list" class="list-scroll"></div>
           <button id="btn-load-more-contacts" class="load-more-btn" style="display:none">Load More</button>
         </div>
@@ -265,7 +265,7 @@
 <!-- Contact modal: Fix 29 — more fields including birthday -->
 <div id="contact-modal" class="modal-overlay" style="z-index: 300;">
   <div class="modal-window">
-    <div class="modal-header"><span>Edit Contact</span><button id="btn-close-contact">✕</button></div>
+    <div class="modal-header"><span id="contact-modal-title">Edit Contact</span><button id="btn-close-contact">✕</button></div>
     <div class="modal-body">
       <input type="hidden" id="contact-rn"><input type="hidden" id="contact-etag">
       <div class="form-row">

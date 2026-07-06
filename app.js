@@ -609,6 +609,7 @@ function setupEventListeners() {
   // Fix 28: All-day toggle
   document.getElementById('event-allday').addEventListener('change', (e) => updateAllDayFields(e.target.checked));
 
+  document.getElementById('btn-new-contact').addEventListener('click', () => openContactModal());
   document.getElementById('btn-close-contact').addEventListener('click', () => document.getElementById('contact-modal').classList.remove('open'));
   document.getElementById('btn-cancel-contact').addEventListener('click', () => document.getElementById('contact-modal').classList.remove('open'));
   document.getElementById('btn-save-contact').addEventListener('click', saveContact);
@@ -1182,12 +1183,15 @@ function stopContactsPoll() {
 function updateUnreadBadge() {
   const unreadCount = State.mail.items.filter(m => m.labelIds?.includes('UNREAD')).length;
   const badge = document.getElementById('unread-badge');
+  const label = document.getElementById('unread-badge-label');
   if (!badge) return;
   if (unreadCount > 0) {
     badge.textContent = unreadCount > 99 ? '99+' : String(unreadCount);
     badge.style.display = 'inline';
+    if (label) label.style.display = 'inline';
   } else {
     badge.style.display = 'none';
+    if (label) label.style.display = 'none';
   }
 }
 
@@ -1586,7 +1590,7 @@ function getAttachmentsAndInlines(payload) {
 
       // If explicitly marked as attachment (even with CID), treat as attachment
       if (cidHeader && !isExplicitAttachment) {
-        item.id = cidHeader.value.replace(/[<>]/g, '');
+        item.id = cidHeader.value.replace(/[<>]/g, '').trim();
         inlines.push(item);
       } else if (filename || hasAttachmentId || isExplicitAttachment) {
         atts.push(item);
@@ -1707,7 +1711,11 @@ async function renderEmail(msg) {
           // Robust replacement without breaking on special regex characters
           htmlData = htmlData.split(`cid:${inline.id}`).join(`data:${inline.mime};base64,${base64}`);
         }
-      } catch (e) { }
+      } catch (e) {
+        // Don't fail silently — an unresolved cid: reference just renders as a
+        // permanently broken image with no clue why. Surface it in the console.
+        console.warn(`[Aether] Failed to load inline image (cid:${inline.id}):`, e.message);
+      }
     }
   }
 
@@ -1737,16 +1745,23 @@ let cleanHtml = htmlData;
     if (!src || !/^https?:\/\//i.test(src)) return; // skip inline data: and cid: already resolved
 
     const alt = img.getAttribute('alt') || '';
-    const widthAttr  = parseInt(img.getAttribute('width')  || img.style.width  || '0', 10);
-    const heightAttr = parseInt(img.getAttribute('height') || img.style.height || '0', 10);
+    const widthRaw  = img.getAttribute('width')  || img.style.width  || '';
+    const heightRaw = img.getAttribute('height') || img.style.height || '';
+    // null = "not specified" — must NOT be treated the same as an explicit 0.
+    // Most legitimate content images (photos, banners, logos) never set a width/
+    // height attribute at all; parseInt(... || '0') used to default that absence
+    // to 0, which made almost every ordinary image look like a 0×0 tracking pixel
+    // and get silently hidden.
+    const widthAttr  = widthRaw  !== '' ? parseInt(widthRaw, 10)  : null;
+    const heightAttr = heightRaw !== '' ? parseInt(heightRaw, 10) : null;
     const displayStyle = (img.getAttribute('style') || '').toLowerCase();
     const sizeLabel = `${img.getAttribute('width') || '?'}x${img.getAttribute('height') || '?'}`;
 
     // Classify as tracking pixel if ANY of these conditions are true:
-    const isTiny       = (widthAttr > 0 && widthAttr <= 3) || (heightAttr > 0 && heightAttr <= 3);
-    const isZero       = widthAttr === 0 || heightAttr === 0;
+    const isTiny       = (widthAttr !== null && widthAttr > 0 && widthAttr <= 3) || (heightAttr !== null && heightAttr > 0 && heightAttr <= 3);
+    const isZero       = widthAttr === 0 || heightAttr === 0; // explicitly declared 0 — not merely unspecified
     const isHidden     = /display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0/.test(displayStyle);
-    const isNoAltTiny  = alt === '' && (widthAttr <= 3 || heightAttr <= 3);
+    const isNoAltTiny  = alt === '' && ((widthAttr !== null && widthAttr <= 3) || (heightAttr !== null && heightAttr <= 3));
     // URLs that are clearly analytics/tracking endpoints (not CDN static assets)
     // Be careful not to block legitimate CDN images that have tracking query params (?u=...)
     // We only block if the PATH SEGMENT itself is a known tracker endpoint
@@ -3399,7 +3414,30 @@ function showContactDetail(c) {
   viewer.appendChild(actions);
 }
 
-function openContactModal(c) {
+function openContactModal(c = null) {
+  const titleEl  = document.getElementById('contact-modal-title');
+  const deleteBtn = document.getElementById('btn-delete-contact-modal');
+
+  if (!c) {
+    // ── New contact: blank form, no resourceName/etag yet ──────────────────
+    titleEl.textContent = 'New Contact';
+    deleteBtn.style.display = 'none'; // nothing saved yet to delete
+    document.getElementById('contact-rn').value = '';
+    document.getElementById('contact-etag').value = '';
+    document.getElementById('contact-edit-first-name').value = '';
+    document.getElementById('contact-edit-last-name').value  = '';
+    document.getElementById('contact-edit-email').value   = '';
+    document.getElementById('contact-edit-phone').value   = '';
+    document.getElementById('contact-edit-company').value = '';
+    document.getElementById('contact-edit-title').value   = '';
+    document.getElementById('contact-edit-notes').value   = '';
+    document.getElementById('contact-edit-birthday').value = '';
+    document.getElementById('contact-modal').classList.add('open');
+    return;
+  }
+
+  titleEl.textContent = 'Edit Contact';
+  deleteBtn.style.display = '';
   document.getElementById('contact-rn').value = c.resourceName;
   document.getElementById('contact-etag').value = c.etag || '';
 
@@ -3440,7 +3478,6 @@ async function saveContact() {
   const last  = document.getElementById('contact-edit-last-name').value.trim();
 
   const body = {
-    etag: document.getElementById('contact-etag').value,
     names: [{ givenName: first || 'Unknown', familyName: last }]
   };
   const updateFields = ['names'];
@@ -3472,8 +3509,18 @@ async function saveContact() {
   }
 
   try {
-    await gapi('PATCH', `https://people.googleapis.com/v1/${rn}:updateContact?updatePersonFields=${updateFields.join(',')}`, body);
-    toast('Contact updated!', 'success');
+    if (rn) {
+      // Editing an existing contact — etag is required so the API can detect
+      // if it changed since we last read it.
+      body.etag = document.getElementById('contact-etag').value;
+      await gapi('PATCH', `https://people.googleapis.com/v1/${rn}:updateContact?updatePersonFields=${updateFields.join(',')}`, body);
+      toast('Contact updated!', 'success');
+    } else {
+      // Brand new contact — no resourceName/etag exists yet, so this is a plain
+      // create rather than a field-masked update.
+      await gapi('POST', 'https://people.googleapis.com/v1/people:createContact', body);
+      toast('Contact created!', 'success');
+    }
     document.getElementById('contact-modal').classList.remove('open');
     loadContacts();
   } catch (err) {
