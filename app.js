@@ -1741,8 +1741,18 @@ let cleanHtml = htmlData;
   const allowedLog = [];
 
   doc.querySelectorAll('img').forEach(img => {
-    const src = img.getAttribute('src');
-    if (!src || !/^https?:\/\//i.test(src)) return; // skip inline data: and cid: already resolved
+    let src = img.getAttribute('src');
+    if (!src) return;
+    // Protocol-relative URLs ("//media.licdn.com/...", "//temu-static.com/...")
+    // are common in LinkedIn/Temu marketing emails. They're valid HTML, but
+    // this body is rendered inside a sandboxed iframe loaded from a blob: URL,
+    // where "//host/path" resolution is unreliable — the image silently never
+    // loads. Normalize to an explicit https: URL so it always resolves.
+    if (/^\/\//.test(src)) {
+      src = 'https:' + src;
+      img.setAttribute('src', src);
+    }
+    if (!/^https?:\/\//i.test(src)) return; // skip inline data: and cid: already resolved
 
     const alt = img.getAttribute('alt') || '';
     const widthRaw  = img.getAttribute('width')  || img.style.width  || '';
@@ -2044,10 +2054,17 @@ async function downloadAttachment(msgId, attId, filename, inlineData, mimeType) 
 // arbitrary script execution.
 const DOMPURIFY_URL = 'https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.4.11/purify.min.js';
 const DOMPURIFY_SRI = 'sha384-o44XUELLEnv/iSlA1NWxBweqbD4TSR0qgq2VzVsxtkHS989JJjGKSE9vkfo5MN4K';
+// Mirror on a second CDN, tried only if cdnjs fails — cuts down how often we
+// ever have to fall back to the crude escaped-text path below at all.
+const DOMPURIFY_URL_FALLBACK = 'https://cdn.jsdelivr.net/npm/dompurify@3.4.11/dist/purify.min.js';
+const DOMPURIFY_SRI_FALLBACK = 'sha384-o44XUELLEnv/iSlA1NWxBweqbD4TSR0qgq2VzVsxtkHS989JJjGKSE9vkfo5MN4K';
 let domPurifyLoadPromise = null;
 function ensureDomPurify() {
   if (window.DOMPurify) return Promise.resolve();
-  if (!domPurifyLoadPromise) domPurifyLoadPromise = loadScript(DOMPURIFY_URL, DOMPURIFY_SRI);
+  if (!domPurifyLoadPromise) {
+    domPurifyLoadPromise = loadScript(DOMPURIFY_URL, DOMPURIFY_SRI)
+      .catch(() => loadScript(DOMPURIFY_URL_FALLBACK, DOMPURIFY_SRI_FALLBACK));
+  }
   return domPurifyLoadPromise;
 }
 async function sanitizeHtml(dirty) {
@@ -2060,10 +2077,38 @@ async function sanitizeHtml(dirty) {
     // an email client where forwarded/quoted content should still look right.
     return DOMPurify.sanitize(dirty, { ADD_ATTR: ['target'] }); // preserve target="_blank" on links
   } catch (e) {
-    // If the sanitizer itself fails to load (offline, CDN blocked, etc.), fail
-    // closed: better to show plain escaped text than risk unsanitized HTML.
+    // If the sanitizer itself fails to load (offline, both CDNs blocked, etc.),
+    // fail closed: better to show plain escaped text than risk unsanitized HTML.
     console.warn('[Aether] DOMPurify unavailable, falling back to escaped text:', e.message);
-    return escHtml(dirty.replace(/<[^>]*>/g, ''));
+    // IMPORTANT: don't just regex-strip tags off the raw string. Two problems
+    // with that: (1) quoted/nested reply chains are full of adjacent block
+    // elements (</div><div>, </p><p>, ...) with no actual whitespace between
+    // them in the source — the line break is implied by the tags being
+    // block-level, so deleting tags merges the end of one paragraph straight
+    // into the start of the next (e.g. a sign-off "...István" running into the
+    // next quoted message's "Gábor Tóth <...> wrote:"). (2) raw HTML text
+    // already contains entities (a literal "&lt;" standing in for "<"); naively
+    // escaping the raw string afterwards double-encodes it into "&amp;lt;",
+    // which then displays as literal "&lt;" garbage instead of "<".
+    // DOMParser sorts both out safely: script tags never execute in a document
+    // built this way, and .textContent gives back real, once-decoded
+    // characters — so we escape it exactly once, correctly.
+    try {
+      const parsed = new DOMParser().parseFromString(dirty, 'text/html');
+      const BLOCK_TAGS = new Set(['DIV','P','BR','TR','LI','H1','H2','H3','H4','H5','H6','BLOCKQUOTE','TABLE','UL','OL']);
+      let text = '';
+      (function walk(node) {
+        if (node.nodeType === Node.TEXT_NODE) { text += node.nodeValue; return; }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        if (node.tagName === 'SCRIPT' || node.tagName === 'STYLE') return;
+        node.childNodes.forEach(walk);
+        if (BLOCK_TAGS.has(node.tagName)) text += '\n';
+      })(parsed.body);
+      return escHtml(text).replace(/\n+/g, '<br>');
+    } catch (e2) {
+      // Last-resort fallback if even DOMParser fails for some reason.
+      return escHtml(dirty.replace(/<[^>]*>/g, ''));
+    }
   }
 }
 
@@ -3055,7 +3100,7 @@ function openEventModalFill(event, recurScope) {
   btnDel.style.display = event ? 'inline-flex' : 'none';
 
   const calSelect = document.getElementById('event-calendar');
-  calSelect.disabled = !!event;
+  calSelect.disabled = false;
   if (event?.calendarId) {
     calSelect.value = event.calendarId;
   } else if (calSelect.options.length > 0) {
@@ -3156,13 +3201,29 @@ async function saveEvent() {
   };
   if (rruleVal) body.recurrence = [rruleVal];
 
-  const calId = State.calendar.editingEventId ? State.calendar.editingCalendarId : document.getElementById('event-calendar').value;
+  let calId = State.calendar.editingEventId ? State.calendar.editingCalendarId : document.getElementById('event-calendar').value;
 
   try {
     if (State.calendar.editingEventId) {
       const scope = document.getElementById('event-recurrence-scope').value;
       const event = State.calendar.editingEvent;
       const isRecurring = !!(event?.recurrence?.[0] || event?.recurringEventId);
+
+      // Moving an event to a different calendar requires a dedicated endpoint —
+      // a normal PATCH/PUT body update can't reassign which calendar an event
+      // lives on. Google's move endpoint only supports moving a whole event (or
+      // whole series), not a single occurrence of a recurring one, so we only
+      // attempt it outside that case.
+      const selectedCalId = document.getElementById('event-calendar').value;
+      if (selectedCalId && selectedCalId !== State.calendar.editingCalendarId) {
+        if (isRecurring && scope !== 'all') {
+          toast('Changing calendar is only supported for the whole series — choose "all events" to move it, or edit the series itself.', 'error');
+          return;
+        }
+        await gapi('POST', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(State.calendar.editingCalendarId)}/events/${State.calendar.editingEventId}/move?destination=${encodeURIComponent(selectedCalId)}`);
+        calId = selectedCalId;
+        State.calendar.editingCalendarId = selectedCalId;
+      }
 
       if (isRecurring && scope !== 'all') {
         // Edit this occurrence (or this + following) via instance endpoint
