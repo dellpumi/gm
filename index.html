@@ -146,6 +146,18 @@
               <div class="compose-field"><label>Cc</label><input type="text" id="reply-cc" class="autocomplete-input" placeholder="Carbon copy"></div>
               <div class="compose-field"><label>Bcc</label><input type="text" id="reply-bcc" class="autocomplete-input" placeholder="Blind carbon copy"></div>
               <div class="compose-field"><label>Subject</label><input type="text" id="reply-subject"></div>
+              <div class="format-toolbar" data-target="reply-body">
+                <button type="button" class="fmt-btn" data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+                <button type="button" class="fmt-btn" data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+                <button type="button" class="fmt-btn" data-cmd="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+                <button type="button" class="fmt-btn" data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
+                <span class="fmt-divider"></span>
+                <button type="button" class="fmt-btn" data-cmd="insertUnorderedList" title="Bulleted list">UL</button>
+                <button type="button" class="fmt-btn" data-cmd="insertOrderedList" title="Numbered list">OL</button>
+                <span class="fmt-divider"></span>
+                <button type="button" class="fmt-btn" data-cmd="createLink" title="Insert link">🔗</button>
+                <button type="button" class="fmt-btn" data-cmd="removeFormat" title="Clear formatting">🧹</button>
+              </div>
               <div id="reply-body" class="rich-editor" contenteditable="true" placeholder="Write your reply... (Drag &amp; Drop images here)"></div>
               <div class="attached-files" id="reply-attached-files-list"></div>
               <div class="reply-editor-footer">
@@ -201,7 +213,21 @@
     <div class="compose-field"><label>Cc</label><input type="text" id="compose-cc" class="autocomplete-input" placeholder="Carbon copy"></div>
     <div class="compose-field"><label>Bcc</label><input type="text" id="compose-bcc" class="autocomplete-input" placeholder="Blind carbon copy"></div>
     <div class="compose-field"><label>Subject</label><input type="text" id="compose-subject" placeholder="Subject"></div>
-    <div class="compose-body"><div id="compose-body-text" class="rich-editor" contenteditable="true" placeholder="Write your message... (Drag &amp; Drop images here)"></div></div>
+    <div class="compose-body">
+      <div class="format-toolbar" data-target="compose-body-text">
+        <button type="button" class="fmt-btn" data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+        <button type="button" class="fmt-btn" data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+        <button type="button" class="fmt-btn" data-cmd="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+        <button type="button" class="fmt-btn" data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
+        <span class="fmt-divider"></span>
+        <button type="button" class="fmt-btn" data-cmd="insertUnorderedList" title="Bulleted list">UL</button>
+        <button type="button" class="fmt-btn" data-cmd="insertOrderedList" title="Numbered list">OL</button>
+        <span class="fmt-divider"></span>
+        <button type="button" class="fmt-btn" data-cmd="createLink" title="Insert link">🔗</button>
+        <button type="button" class="fmt-btn" data-cmd="removeFormat" title="Clear formatting">🧹</button>
+      </div>
+      <div id="compose-body-text" class="rich-editor" contenteditable="true" placeholder="Write your message... (Drag &amp; Drop images here)"></div>
+    </div>
     <div class="attached-files" id="attached-files-list"></div>
     <div class="compose-footer">
       <label class="attach-btn" for="compose-attach-input">📎 Attach</label>
@@ -305,14 +331,18 @@
   <div class="file-preview-window">
     <div class="file-preview-header">
       <span id="file-preview-title">Preview</span>
+      <span id="file-preview-counter" class="file-preview-counter" style="display:none;"></span>
       <div style="display:flex;gap:8px;align-items:center;margin-left:auto;">
         <button class="action-btn" id="file-preview-download">⬇ Download</button>
         <button class="file-preview-close-btn" id="file-preview-close" title="Close">✕</button>
       </div>
     </div>
     <div id="file-preview-body" class="file-preview-body"></div>
+    <button id="file-preview-prev" class="file-preview-nav-btn file-preview-nav-prev" title="Previous attachment (←)" style="display:none;">‹</button>
+    <button id="file-preview-next" class="file-preview-nav-btn file-preview-nav-next" title="Next attachment (→)" style="display:none;">›</button>
   </div>
 </div>
+
 
 <div id="toast-container"></div>
 

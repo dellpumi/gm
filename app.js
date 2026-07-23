@@ -526,6 +526,7 @@ function setupEventListeners() {
     if (window._xlsxWb)    { window._xlsxWb = null; }
     if (window._zipInst)   { window._zipInst = null; }
     if (window._zipExtract){ window._zipExtract = null; }
+    modal._navList = null; modal._navIndex = 0; modal._navMsgId = null;
     document.getElementById('file-preview-body').innerHTML = '';
   }
   document.getElementById('file-preview-close').addEventListener('click', closeFilePreview);
@@ -547,6 +548,8 @@ function setupEventListeners() {
       else if (contact.classList.contains('open')) contact.classList.remove('open');
       else if (evModal.classList.contains('open')) evModal.classList.remove('open');
       else if (compose.classList.contains('open')) compose.classList.remove('open');
+    } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && document.getElementById('file-preview-modal').classList.contains('open')) {
+      navigateAttachment(e.key === 'ArrowLeft' ? -1 : 1);
     }
   });
 
@@ -585,6 +588,8 @@ function setupEventListeners() {
   document.getElementById('reply-body').addEventListener('paste', handleRichTextMedia);
   document.getElementById('reply-body').addEventListener('drop', handleRichTextMedia);
 
+  document.querySelectorAll('.format-toolbar').forEach(wireFormatToolbar);
+
   document.getElementById('btn-cal-prev').addEventListener('click', () => { State.calendar.date.setMonth(State.calendar.date.getMonth() - 1); loadCalendar(); });
   document.getElementById('btn-cal-next').addEventListener('click', () => { State.calendar.date.setMonth(State.calendar.date.getMonth() + 1); loadCalendar(); });
   document.getElementById('btn-cal-today').addEventListener('click', () => { State.calendar.date = new Date(); loadCalendar(); });
@@ -622,6 +627,53 @@ function setupEventListeners() {
   });
 
   document.querySelectorAll('.autocomplete-input').forEach(input => attachAutocomplete(input));
+}
+
+// Basic formatting toolbar for the reply/compose/forward editors (bold, italic,
+// underline, strikethrough, lists, link, clear formatting). Uses execCommand,
+// same as the existing insertHTML call in handleRichTextMedia below — it's
+// deprecated in spec terms but every major browser still fully supports it,
+// and it's the simplest way to get real formatting into a contenteditable div
+// without pulling in a whole rich-text-editor library for what's meant to stay
+// basic. One toolbar-wiring function handles both editors via data-target.
+function wireFormatToolbar(toolbar) {
+  const editor = document.getElementById(toolbar.dataset.target);
+  if (!editor) return;
+
+  toolbar.querySelectorAll('.fmt-btn').forEach(btn => {
+    // Without this, clicking a toolbar button blurs the editor first (losing
+    // the text selection) before the click handler ever runs — so the command
+    // would apply to nothing. Blocking mousedown keeps focus/selection intact.
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    btn.addEventListener('click', () => {
+      const cmd = btn.dataset.cmd;
+      if (cmd === 'createLink') {
+        const url = prompt('Link URL:', 'https://');
+        if (!url) return;
+        document.execCommand('createLink', false, url);
+      } else {
+        document.execCommand(cmd, false, null);
+      }
+      editor.focus();
+      updateToolbarState(toolbar, editor);
+    });
+  });
+
+  // Reflect the formatting under the cursor as it moves — so e.g. the Bold
+  // button visibly lights up while the cursor is inside bold text.
+  const sync = () => updateToolbarState(toolbar, editor);
+  editor.addEventListener('keyup', sync);
+  editor.addEventListener('mouseup', sync);
+  editor.addEventListener('focus', sync);
+}
+
+function updateToolbarState(toolbar, editor) {
+  if (document.activeElement !== editor) return;
+  toolbar.querySelectorAll('.fmt-btn[data-cmd]').forEach(btn => {
+    const cmd = btn.dataset.cmd;
+    if (cmd === 'createLink' || cmd === 'removeFormat') return; // one-shot actions, not toggle states
+    try { btn.classList.toggle('active', document.queryCommandState(cmd)); } catch (e) {}
+  });
 }
 
 function handleRichTextMedia(e) {
@@ -1637,7 +1689,7 @@ async function renderEmail(msg) {
     attContainer.appendChild(el('div', 'attachments-title', `📎 Attachments (${atts.length})`));
     const chips = el('div', 'attachment-chips');
     
-    atts.forEach(a => {
+    atts.forEach((a, attIndex) => {
       const chip = el('div', 'attachment-chip');
       const thumbArea = el('div', 'attachment-thumb-area');
       const infoArea = el('div', 'attachment-info');
@@ -1688,7 +1740,7 @@ async function renderEmail(msg) {
         || (a.mime || '').startsWith('audio/')
         || (a.mime || '').startsWith('text/');
       chip.onclick = () => isPreviewable
-        ? previewAttachment(msg.id, a.attachmentId, a.filename, a.mime, a.data)
+        ? previewAttachment(msg.id, a.attachmentId, a.filename, a.mime, a.data, atts, attIndex)
         : downloadAttachment(msg.id, a.attachmentId, a.filename, a.data, a.mime);
       chips.appendChild(chip);
     });
@@ -2063,7 +2115,8 @@ function ensureDomPurify() {
   if (window.DOMPurify) return Promise.resolve();
   if (!domPurifyLoadPromise) {
     domPurifyLoadPromise = loadScript(DOMPURIFY_URL, DOMPURIFY_SRI)
-      .catch(() => loadScript(DOMPURIFY_URL_FALLBACK, DOMPURIFY_SRI_FALLBACK));
+      .catch(() => loadScript(DOMPURIFY_URL_FALLBACK, DOMPURIFY_SRI_FALLBACK))
+      .catch((e) => { domPurifyLoadPromise = null; throw e; }); // let a later call retry instead of being stuck on one failure for the rest of the session
   }
   return domPurifyLoadPromise;
 }
@@ -2113,29 +2166,85 @@ async function sanitizeHtml(dirty) {
 }
 
 // ── File preview modal: PDF (iframe), DOCX (mammoth.js), XLSX (SheetJS) ──────
+// Cache the in-flight/loaded promise per URL, not just whether a <script> tag
+// exists — a tag can be present in the DOM the instant it's appended, well
+// before the browser has actually finished fetching and executing it. Without
+// this, two calls to loadScript() for the same URL a few ms apart (e.g.
+// navigating quickly between two ZIP or DOCX attachments) would have the
+// second call see the first's <script> tag and resolve immediately, letting
+// code try to use JSZip/mammoth/XLSX before the library was actually defined.
+const _scriptLoadPromises = {};
 function loadScript(src, integrity) {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+  if (_scriptLoadPromises[src]) return _scriptLoadPromises[src];
+  const promise = new Promise((resolve, reject) => {
     const s = document.createElement('script');
     s.src = src;
     if (integrity) { s.integrity = integrity; s.crossOrigin = 'anonymous'; }
     s.onload = resolve;
-    s.onerror = () => reject(new Error('Failed to load: ' + src));
+    s.onerror = () => { delete _scriptLoadPromises[src]; reject(new Error('Failed to load: ' + src)); };
     document.head.appendChild(s);
   });
+  _scriptLoadPromises[src] = promise;
+  return promise;
 }
 
-async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
+// Steps to the previous/next attachment in the currently open preview modal's
+// nav list (set by previewAttachment whenever it's opened from a message with
+// more than one attachment). No-op if there's no list or we're at an edge.
+function navigateAttachment(delta) {
+  const modal = document.getElementById('file-preview-modal');
+  const list = modal._navList;
+  if (!list || list.length < 2) return;
+  const newIndex = modal._navIndex + delta;
+  if (newIndex < 0 || newIndex >= list.length) return;
+  const a = list[newIndex];
+  previewAttachment(modal._navMsgId, a.attachmentId, a.filename, a.mime, a.data, list, newIndex);
+}
+
+async function previewAttachment(msgId, attId, filename, mimeType, inlineData, navList = null, navIndex = 0) {
   const modal   = document.getElementById('file-preview-modal');
   const bodyEl  = document.getElementById('file-preview-body');
   const titleEl = document.getElementById('file-preview-title');
+
+  // Identifies this specific call among possibly-overlapping ones. Attachment
+  // navigation means a user can click "next" again before a non-inline
+  // attachment's Gmail API fetch has resolved — without this, that stale,
+  // now-abandoned fetch could still land afterwards and overwrite the newer
+  // (correct) preview with the wrong content, or an error from it could
+  // clobber a preview that loaded fine.
+  const myToken = (modal._loadToken = (modal._loadToken || 0) + 1);
 
   titleEl.textContent = filename;
   bodyEl.innerHTML = '<div class="loading-spinner" style="background:var(--bg);flex:1;display:flex;align-items:center;justify-content:center;gap:10px;color:var(--text2);"><div class="spinner"></div> Loading preview…</div>';
   modal.classList.add('open');
 
   if (modal._blobUrl) { URL.revokeObjectURL(modal._blobUrl); modal._blobUrl = null; }
-  if (window._xlsxWb) { window._xlsxWb = null; }
+  if (window._xlsxWb)     { window._xlsxWb = null; }
+  if (window._zipInst)    { window._zipInst = null; }
+  if (window._zipExtract) { window._zipExtract = null; }
+
+  // Prev/Next navigation — only shown when this preview was opened from a
+  // message with more than one attachment (images among them included).
+  modal._navList  = navList;
+  modal._navIndex = navIndex;
+  modal._navMsgId = msgId;
+  const prevBtn = document.getElementById('file-preview-prev');
+  const nextBtn = document.getElementById('file-preview-next');
+  const counterEl = document.getElementById('file-preview-counter');
+  if (navList && navList.length > 1) {
+    prevBtn.style.display = 'flex';
+    nextBtn.style.display = 'flex';
+    prevBtn.disabled = navIndex === 0;
+    nextBtn.disabled = navIndex === navList.length - 1;
+    prevBtn.onclick = () => navigateAttachment(-1);
+    nextBtn.onclick = () => navigateAttachment(1);
+    counterEl.style.display = 'inline-block';
+    counterEl.textContent = `${navIndex + 1} / ${navList.length}`;
+  } else {
+    prevBtn.style.display = 'none';
+    nextBtn.style.display = 'none';
+    counterEl.style.display = 'none';
+  }
 
   document.getElementById('file-preview-download').onclick = () =>
     downloadAttachment(msgId, attId, filename, inlineData, mimeType);
@@ -2146,6 +2255,7 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
       b64str = padB64(inlineData);
     } else {
       const data = await gapi('GET', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msgId}/attachments/${attId}`);
+      if (modal._loadToken !== myToken) return; // a newer preview started while this fetch was in flight — drop it
       b64str = padB64(data.data);
     }
     const byteStr = atob(b64str);
@@ -2165,8 +2275,14 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
     if (ext === 'pdf' || mime === 'application/pdf') {
       // Sandboxed for the same reason as the HTML preview below: a PDF someone sent
       // us can carry embedded JavaScript actions, and the built-in viewer still runs
-      // inside this iframe's origin unless we lock it down.
-      bodyEl.innerHTML = `<iframe src="${makeBlobUrl('application/pdf')}#view=FitH" sandbox="allow-popups allow-popups-to-escape-sandbox" style="width:100%;height:100%;border:none;"></iframe>`;
+      // inside this iframe's origin unless we lock it down. allow-scripts IS required
+      // here though — the browser's own built-in PDF viewer needs to run its own JS
+      // to build the rendering canvas; without it, it fails to initialize and shows a
+      // black frame instead of the PDF (this is not the same risk as allowing scripts
+      // in arbitrary email HTML: without allow-same-origin, this frame gets a unique,
+      // opaque origin on every load — no cookies, no storage, no access to the parent
+      // Gmail session or API tokens, and it can't navigate the top-level page).
+      bodyEl.innerHTML = `<iframe src="${makeBlobUrl('application/pdf')}#view=FitH" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" style="width:100%;height:100%;border:none;"></iframe>`;
 
     // ── Images ───────────────────────────────────────────────────────────────
     } else if (['jpg','jpeg','png','gif','webp','svg','bmp','ico','tiff','tif'].includes(ext) || mime.startsWith('image/')) {
@@ -2223,11 +2339,14 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
         ]
       };
       const result = await mammoth.convertToHtml({ arrayBuffer: bytes.buffer }, options);
-      bodyEl.innerHTML = `<div class="file-preview-content docx-content">${await sanitizeHtml(result.value)}</div>`;
+      const safeDocxHtml = await sanitizeHtml(result.value);
+      if (modal._loadToken !== myToken) return;
+      bodyEl.innerHTML = `<div class="file-preview-content docx-content">${safeDocxHtml}</div>`;
 
     // ── XLSX / XLS / XLSM ────────────────────────────────────────────────────
     } else if (['xlsx','xls','xlsm'].includes(ext) || mime.includes('spreadsheetml') || mime.includes('ms-excel')) {
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js', 'sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw');
+      if (modal._loadToken !== myToken) return;
       window._xlsxWb = XLSX.read(bytes, { type: 'array' });
       const wb = window._xlsxWb;
       const sheetTabs = wb.SheetNames.length > 1
@@ -2245,12 +2364,14 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
     } else if (ext === 'pptx' || mime.includes('presentationml.presentation')) {
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', 'sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG');
       const slidesHtml = await renderPptxSlides(bytes);
+      if (modal._loadToken !== myToken) return;
       bodyEl.innerHTML = `<div class="file-preview-content pptx-content">${slidesHtml}</div>`;
 
     // ── ZIP — list contents with per-file extract ─────────────────────────────
     } else if (['zip'].includes(ext) || mime === 'application/zip' || mime === 'application/x-zip-compressed') {
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', 'sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG');
       const zip = await JSZip.loadAsync(bytes.buffer);
+      if (modal._loadToken !== myToken) return;
 
       const entries = [];
       zip.forEach((path, file) => entries.push({ path, file, isDir: file.dir, size: file._data?.uncompressedSize || 0, date: file.date }));
@@ -2352,6 +2473,7 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData) {
       </div>`;
     }
   } catch (e) {
+    if (modal._loadToken !== myToken) return; // this request was superseded — don't clobber whatever's showing now
     bodyEl.innerHTML = `<div class="file-preview-unsupported">
       Failed to load preview.<br><small style="opacity:.6;">${escHtml(e.message)}</small>
     </div>`;
