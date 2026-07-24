@@ -268,6 +268,13 @@ button { outline: none; font-family: var(--font); }
 .rich-editor { flex: 1; width: 100%; min-height: 100px; background: none; border: none; outline: none; color: var(--text); font-size: 13.5px; font-family: var(--font); overflow-y: auto; overflow-x: hidden; line-height: 1.6; word-break: break-word; }
 .rich-editor:empty:before { content: attr(placeholder); color: var(--text3); pointer-events: none; display: block; }
 .rich-editor img { max-width: 100%; height: auto; border-radius: 4px; margin: 4px 0; border: 1px solid var(--border); object-fit: contain; }
+/* The global "*{margin:0;padding:0}" reset above strips the padding-left that
+   <ul>/<ol> need to make room for their bullet/number markers — with zero
+   padding and this editor's overflow-x:hidden, execCommand still builds a
+   correct <ul>/<ol><li> structure, but the markers render just outside it
+   and get invisibly clipped off. Restore just enough space for them. */
+.rich-editor ul, .rich-editor ol { padding-left: 1.6em; margin: 0.3em 0; }
+.rich-editor li { margin: 0.15em 0; }
 
 /* Image Resizer Wrappers */
 .resizable-img { display: inline-block; resize: both; overflow: hidden; max-width: 100%; border: 1px dashed transparent; padding: 2px; box-sizing: border-box; vertical-align: top; }
