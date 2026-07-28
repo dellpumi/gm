@@ -1895,11 +1895,30 @@ let cleanHtml = htmlData;
      }
   }
 
-  // Build the unblocked version: restore data-blocked-src back to src, remove hidden styles
-  const unblockedHtml = safeHtml
-    .replace(/\s*src="data:image\/svg\+xml[^"]*"/g, '')
-    .replace(/data-blocked-src="/g, 'src="')
-    .replace(/style="display: none;"\s*/g, '');
+  // Build the unblocked version: restore data-blocked-src back to src, remove hidden styles.
+  // This has to walk tag-by-tag rather than run document-wide regexes for two reasons:
+  // (1) img.style.display = 'none' above doesn't create a clean standalone
+  //     style="display: none;" attribute — if the image already had OTHER inline
+  //     styles (virtually every real marketing-email image does, e.g. Temu's
+  //     "border:0;display:block;width:100%;..."), the browser merges "display: none"
+  //     into that existing style string instead of replacing it. A regex looking for
+  //     an exact, isolated style="display: none;" never matches that merged string, so
+  //     the image stays hidden forever even after "Load all images" successfully
+  //     restores its src — this was the actual bug behind pictures never appearing.
+  // (2) scoping the display:none removal to only tags carrying data-blocked-src (the
+  //     marker we ourselves added) avoids ever touching some OTHER element's
+  //     legitimately-hidden content, like a marketing template's hidden preheader text.
+  const unblockedHtml = safeHtml.replace(/<img\b[^>]*>/gi, (imgTag) => {
+    if (!/data-blocked-src=/.test(imgTag)) return imgTag; // not one we blocked — leave untouched
+    let fixed = imgTag
+      .replace(/\s*src="data:image\/svg\+xml[^"]*"/i, '')
+      .replace(/data-blocked-src="/i, 'src="');
+    fixed = fixed.replace(/style="([^"]*)"/i, (m, styleContent) => {
+      const cleaned = styleContent.replace(/display\s*:\s*none\s*;?\s*/gi, '').trim();
+      return cleaned ? `style="${cleaned}"` : '';
+    });
+    return fixed;
+  });
 
   function loadIframeHtml(iframe, html) {
     const prev = iframe._blobUrl;
@@ -1922,14 +1941,22 @@ let cleanHtml = htmlData;
 
   const bodyContainer = el('div', 'email-body');
   if (bodyObj.type === 'text/html') {
-    // Untrusted sender HTML lives here. No allow-scripts, no allow-same-origin:
-    // this keeps the frame at an opaque origin with script execution fully
-    // disabled, so nothing in the email body can touch this app's session/token
-    // even if it contains a <script> or an onerror/onload handler.
+    // Untrusted sender HTML lives here. allow-same-origin is present but
+    // allow-scripts is NOT — that's the part that actually matters: with no
+    // allow-scripts, nothing in the email body can ever execute, full stop,
+    // regardless of origin — a <script> tag or an onerror/onload handler is
+    // just inert markup here. (The commonly-cited sandbox escape only exists
+    // when allow-same-origin and allow-scripts are combined; alone,
+    // allow-same-origin can't do anything without script execution to use it.)
+    // What allow-same-origin buys us: without ANY origin, this frame can't
+    // construct a real Referer header for cross-origin requests like images —
+    // some senders' CDNs (hotlink/anti-scraping protection) reject image
+    // requests carrying no referer at all, which silently breaks otherwise
+    // perfectly legitimate, non-tracker content images before they ever load.
     // allow-popups(-to-escape-sandbox) is only there so a normal link still opens
     // a real, unsandboxed tab instead of being silently blocked.
     const iframe = el('iframe', '', '', {
-      sandbox: 'allow-popups allow-popups-to-escape-sandbox',
+      sandbox: 'allow-same-origin allow-popups allow-popups-to-escape-sandbox',
       style: 'width:100%; min-height:300px; height:600px; border:1px solid var(--border); background:#fff; border-radius:8px; flex-shrink:0;'
     });
     loadIframeHtml(iframe, safeHtml);
@@ -2282,7 +2309,11 @@ async function previewAttachment(msgId, attId, filename, mimeType, inlineData, n
       // in arbitrary email HTML: without allow-same-origin, this frame gets a unique,
       // opaque origin on every load — no cookies, no storage, no access to the parent
       // Gmail session or API tokens, and it can't navigate the top-level page).
-      bodyEl.innerHTML = `<iframe src="${makeBlobUrl('application/pdf')}#view=FitH" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" style="width:100%;height:100%;border:none;"></iframe>`;
+      // allow-modals is also required: the built-in viewer's print button just calls
+      // window.print() internally, and per the sandbox spec that call (along with
+      // alert/confirm/prompt) is silently no-op'd — not blocked with an error, just
+      // does nothing — inside a sandboxed frame unless allow-modals is present.
+      bodyEl.innerHTML = `<iframe src="${makeBlobUrl('application/pdf')}#view=FitH" sandbox="allow-scripts allow-modals allow-popups allow-popups-to-escape-sandbox" style="width:100%;height:100%;border:none;"></iframe>`;
 
     // ── Images ───────────────────────────────────────────────────────────────
     } else if (['jpg','jpeg','png','gif','webp','svg','bmp','ico','tiff','tif'].includes(ext) || mime.startsWith('image/')) {
