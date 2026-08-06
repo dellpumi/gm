@@ -289,11 +289,11 @@ button { outline: none; font-family: var(--font); }
 
 .attached-files { display: flex; flex-wrap: wrap; gap: 14px; padding: 0 16px 12px; flex-shrink: 0; max-height: 140px; overflow-y: auto; }
 
-.reply-section { padding: 20px 32px; border-top: 1px solid var(--border); flex-shrink: 0; }
+.reply-section { padding: 20px 32px; border-top: 1px solid var(--border); flex-shrink: 0; max-height: 70vh; overflow-y: auto; }
 .reply-toggle { display: flex; align-items: center; gap: 8px; color: var(--text3); font-size: 13px; cursor: pointer; }
 .reply-editor { background: var(--surface); border: 1px solid var(--border2); border-radius: var(--radius); overflow: hidden; display: none; margin-top: 14px; }
 .reply-editor.open { display: block; }
-.reply-editor .rich-editor { min-height: 120px; max-height: 300px; padding: 16px; overflow-y: auto; }
+.reply-editor .rich-editor { min-height: 60px; max-height: 140px; padding: 16px; overflow-y: auto; }
 
 /* AUTOCOMPLETE POPUP */
 .autocomplete-popup { position: absolute; background: var(--surface2); border: 1px solid var(--border2); border-radius: var(--radius-sm); box-shadow: 0 4px 12px rgba(0,0,0,0.4); z-index: 1000; display: none; max-height: 200px; overflow-y: auto; width: 300px; }

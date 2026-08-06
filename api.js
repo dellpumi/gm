@@ -343,7 +343,7 @@ export const Auth = {
 };
 
 // ── API fetch wrapper ─────────────────────────────────────────────────────────
-export async function gapi(method, url, body = null, isFormData = false, retries = 3, delay = 1000) {
+export async function gapi(method, url, body = null, isFormData = false, retries = 3, delay = 1000, timeoutMs = 15000) {
   if (!navigator.onLine) throw new Error('No internet connection.');
 
   // Hard session expiry gate — never let a request out after 9 hours.
@@ -358,7 +358,7 @@ export async function gapi(method, url, body = null, isFormData = false, retries
   }
 
   const controller = new AbortController();
-  const timeoutId  = setTimeout(() => controller.abort(), 15000);
+  const timeoutId  = setTimeout(() => controller.abort(), timeoutMs);
 
   // no-store: refresh/reload calls repeat the exact same URL (e.g. the same month's
   // calendar events query), so we must never let the browser satisfy that from its
@@ -374,12 +374,12 @@ export async function gapi(method, url, body = null, isFormData = false, retries
     if (!res.ok) {
       if (res.status === 401) {
         const refreshed = await Auth.refresh();
-        if (refreshed && retries > 0) return gapi(method, url, body, isFormData, retries - 1, delay);
+        if (refreshed && retries > 0) return gapi(method, url, body, isFormData, retries - 1, delay, timeoutMs);
         throw new Error('Session expired');
       }
       if (res.status === 429 && retries > 0) {
         await new Promise(r => setTimeout(r, delay));
-        return gapi(method, url, body, isFormData, retries - 1, delay * 2);
+        return gapi(method, url, body, isFormData, retries - 1, delay * 2, timeoutMs);
       }
       const err = await res.json().catch(() => ({}));
       throw new Error(err?.error?.message || `HTTP Error ${res.status}`);

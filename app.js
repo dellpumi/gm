@@ -2850,12 +2850,26 @@ async function sendReply() {
   const body = document.getElementById('reply-body').innerHTML;
   if (!to) return toast('Recipient is required', 'error');
 
+  const btn = document.getElementById('btn-send-reply');
+  const originalLabel = btn.textContent;
+  const hasLargeAttachment = (State.reply.attachments || []).some(f => f.size > 3 * 1024 * 1024);
+  btn.disabled = true;
+  btn.textContent = hasLargeAttachment ? 'Sending… (may take a while)' : 'Sending…';
+
   try {
     await sendRawEmail(to, cc, bcc, subj, body, State.reply.attachments, State.compose.currentThreadId);
     toggleReply(true);
     toast('Reply sent!', 'success');
     refreshCurrent();
-  } catch (e) { toast('Failed to send reply: ' + e.message, 'error'); }
+  } catch (e) {
+    const msg = e.message === 'Request timed out.'
+      ? 'Send timed out — this can happen with large attachments on a slow connection. Please try again.'
+      : e.message;
+    toast('Failed to send reply: ' + msg, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
 }
 
 async function openComposeModal(to='', subj='', bodyHtml='', title='New Message', keepAttachments=false) {
@@ -2923,13 +2937,27 @@ async function sendEmail() {
   const body = document.getElementById('compose-body-text').innerHTML;
   if (!to) return toast('Recipient required', 'error');
 
+  const btn = document.getElementById('btn-send-email');
+  const originalLabel = btn.textContent;
+  const hasLargeAttachment = (State.compose.attachments || []).some(f => f.size > 3 * 1024 * 1024);
+  btn.disabled = true;
+  btn.textContent = hasLargeAttachment ? 'Sending… (may take a while)' : 'Sending…';
+
   try {
     await sendRawEmail(to, cc, bcc, subj, body, State.compose.attachments, null);
     document.getElementById('compose-modal').classList.remove('open');
     State.compose.attachments = [];
     toast('Sent successfully', 'success');
     refreshCurrent();
-  } catch (e) { toast('Failed to send: ' + e.message, 'error'); }
+  } catch (e) {
+    const msg = e.message === 'Request timed out.'
+      ? 'Send timed out — this can happen with large attachments on a slow connection. Please try again.'
+      : e.message;
+    toast('Failed to send: ' + msg, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
 }
 
 async function sendRawEmail(to, cc, bcc, subject, htmlBody, attachments, threadId) {
@@ -2987,8 +3015,20 @@ async function sendRawEmail(to, cc, bcc, subject, htmlBody, attachments, threadI
   }
   
   if (threadId) emailStr = `Thread-Id: ${threadId}\r\n` + emailStr;
-  
-  await gapi('POST', 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send', { raw: utf8ToBase64url(emailStr) });
+
+  const raw = utf8ToBase64url(emailStr);
+  // A flat 15s timeout (fine for ordinary API calls) isn't nearly enough once
+  // an attachment is involved — the whole message, attachment included, goes
+  // out as one base64-encoded POST body, and on a slow connection (e.g. 4G)
+  // that upload alone can take well past 15s, at which point the browser
+  // aborts the request outright (Firefox reports this as NS_BINDING_ABORTED).
+  // Scale the timeout to the payload size instead: assume a pessimistic
+  // sustained upload floor, double it for safety margin, with a sane min/max.
+  const ASSUMED_MIN_UPLOAD_BYTES_PER_SEC = 50 * 1024; // ~400kbps — a pessimistic slow-4G floor
+  const estimatedMs = (raw.length / ASSUMED_MIN_UPLOAD_BYTES_PER_SEC) * 1000;
+  const sendTimeoutMs = Math.min(Math.max(estimatedMs * 2, 60000), 15 * 60000); // floor 60s, cap 15min
+
+  await gapi('POST', 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send', { raw }, false, 3, 1000, sendTimeoutMs);
 }
 
 // ===== CALENDAR =====
