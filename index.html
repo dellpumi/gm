@@ -41,7 +41,7 @@
   <div class="login-card">
     <div class="login-logo">✉️</div>
     <div class="login-title">Aether</div>
-    <div class="login-sub">GBG's all-in-one Gmail client &nbsp;·&nbsp; v4.5 · 2026.08.06</div>
+    <div class="login-sub">GBG's all-in-one Gmail client &nbsp;·&nbsp; v4.6 · 2026.08.10</div>
 
     <div class="login-fields">
       <div class="login-field">
@@ -113,7 +113,7 @@
       </div>
       <div class="topbar-actions">
         <div id="session-timer">
-          <span class="timer-version">v4.5 · 2026.08.06</span>
+          <span class="timer-version">v4.6 · 2026.08.10</span>
           <span class="timer-sep">|</span>
           <span class="timer-icon">⏱</span>
           <span id="timer-slot"     class="timer-slot">--:--</span>
@@ -143,20 +143,24 @@
             <div class="reply-toggle" id="btn-toggle-reply"><span id="reply-arrow">▶</span> Reply</div>
             <div class="reply-editor" id="reply-editor">
               <div class="compose-field"><label>To</label><input type="text" id="reply-to" class="autocomplete-input"></div>
-              <div class="compose-field"><label>Cc</label><input type="text" id="reply-cc" class="autocomplete-input" placeholder="Carbon copy"></div>
-              <div class="compose-field"><label>Bcc</label><input type="text" id="reply-bcc" class="autocomplete-input" placeholder="Blind carbon copy"></div>
-              <div class="compose-field"><label>Subject</label><input type="text" id="reply-subject"></div>
-              <div class="format-toolbar" data-target="reply-body">
-                <button type="button" class="fmt-btn" data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
-                <button type="button" class="fmt-btn" data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
-                <button type="button" class="fmt-btn" data-cmd="underline" title="Underline (Ctrl+U)"><u>U</u></button>
-                <button type="button" class="fmt-btn" data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
-                <span class="fmt-divider"></span>
-                <button type="button" class="fmt-btn" data-cmd="insertUnorderedList" title="Bulleted list">UL</button>
-                <button type="button" class="fmt-btn" data-cmd="insertOrderedList" title="Numbered list">OL</button>
-                <span class="fmt-divider"></span>
-                <button type="button" class="fmt-btn" data-cmd="createLink" title="Insert link">🔗</button>
-                <button type="button" class="fmt-btn" data-cmd="removeFormat" title="Clear formatting">🧹</button>
+              <div class="compose-field-row">
+                <div class="compose-field half"><label>Cc</label><input type="text" id="reply-cc" class="autocomplete-input" placeholder="Carbon copy"></div>
+                <div class="compose-field half"><label>Bcc</label><input type="text" id="reply-bcc" class="autocomplete-input" placeholder="Blind carbon copy"></div>
+              </div>
+              <div class="compose-field-row">
+                <div class="compose-field half"><label>Subject</label><input type="text" id="reply-subject"></div>
+                <div class="format-toolbar half" data-target="reply-body">
+                  <button type="button" class="fmt-btn" data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+                  <button type="button" class="fmt-btn" data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+                  <button type="button" class="fmt-btn" data-cmd="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+                  <button type="button" class="fmt-btn" data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
+                  <span class="fmt-divider"></span>
+                  <button type="button" class="fmt-btn" data-cmd="insertUnorderedList" title="Bulleted list">UL</button>
+                  <button type="button" class="fmt-btn" data-cmd="insertOrderedList" title="Numbered list">OL</button>
+                  <span class="fmt-divider"></span>
+                  <button type="button" class="fmt-btn" data-cmd="createLink" title="Insert link">🔗</button>
+                  <button type="button" class="fmt-btn" data-cmd="removeFormat" title="Clear formatting">🧹</button>
+                </div>
               </div>
               <div id="reply-body" class="rich-editor" contenteditable="true" placeholder="Write your reply... (Drag &amp; Drop images here)"></div>
               <div class="attached-files" id="reply-attached-files-list"></div>

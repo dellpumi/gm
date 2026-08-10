@@ -249,7 +249,15 @@ button { outline: none; font-family: var(--font); }
 .compose-title-bar button:hover { color: var(--red); }
 .compose-field { display: flex; align-items: center; border-bottom: 1px solid var(--border); padding: 0 16px; flex-shrink: 0; }
 .compose-field label { font-size: 11.5px; color: var(--text3); width: 38px; flex-shrink: 0; }
-.compose-field input { flex: 1; background: none; border: none; outline: none; color: var(--text); padding: 10px 8px; font-size: 13.5px; font-family: var(--font); }
+.compose-field input { flex: 1; background: none; border: none; outline: none; color: var(--text); padding: 10px 8px; font-size: 13.5px; font-family: var(--font); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Two fields sharing one row (Cc+Bcc, Subject+toolbar) instead of each getting
+   its own — saves a full row's height per pair, which the flex:1 reading pane
+   above automatically reclaims. min-width:0 on the halves is what lets the
+   ellipsis truncation above actually kick in inside a constrained flex child;
+   without it a flex item won't shrink below its content's natural width. */
+.compose-field-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border); }
+.compose-field-row > .compose-field, .compose-field-row > .format-toolbar { flex: 1 1 50%; min-width: 0; border-bottom: none; }
+.compose-field-row > *:first-child { border-right: 1px solid var(--border); }
 
 .compose-body { flex: 1; padding: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; } 
 .format-toolbar {
@@ -265,6 +273,7 @@ button { outline: none; font-family: var(--font); }
 .fmt-btn:hover { background: var(--surface2); border-color: var(--border); color: var(--text); }
 .fmt-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 .fmt-divider { width: 1px; height: 18px; background: var(--border); margin: 0 3px; flex-shrink: 0; }
+.compose-field-row > .format-toolbar { margin: 0; padding: 0 12px; align-items: center; }
 .rich-editor { flex: 1; width: 100%; min-height: 100px; background: none; border: none; outline: none; color: var(--text); font-size: 13.5px; font-family: var(--font); overflow-y: auto; overflow-x: hidden; line-height: 1.6; word-break: break-word; }
 .rich-editor:empty:before { content: attr(placeholder); color: var(--text3); pointer-events: none; display: block; }
 .rich-editor img { max-width: 100%; height: auto; border-radius: 4px; margin: 4px 0; border: 1px solid var(--border); object-fit: contain; }
