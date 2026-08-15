@@ -224,26 +224,57 @@ function chunkString(str, len = 76) {
 
 function getMimeFilenameParams(filename) {
   const isAscii = !/[^\x00-\x7F]/.test(filename);
-  const encoded = isAscii ? `"${filename}"` : encodeSubject(filename);
-  return {
-    nameStr: `name=${encoded}`,
-    filenameStr: `filename=${encoded}`
-  };
+  if (isAscii) {
+    // RFC 2822 quoted-string rules: a literal backslash or double-quote inside
+    // the value must itself be backslash-escaped. Both are legal filesystem
+    // characters on macOS/Linux (e.g. a downloaded article/PDF titled with
+    // quotes) — without escaping them, the embedded quote closes the
+    // quoted-string early and corrupts the rest of the header.
+    const escaped = filename.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const quoted = `"${escaped}"`;
+    return { nameStr: `name=${quoted}`, filenameStr: `filename=${quoted}` };
+  }
+  const encoded = encodeSubject(filename);
+  return { nameStr: `name=${encoded}`, filenameStr: `filename=${encoded}` };
 }
 
 function encodeAddressList(str) {
   if (!str) return '';
-  return str.split(/[,;]/).map(part => {
+  // Split on comma/semicolon, but NOT when inside a quoted display name — a
+  // contact's own name can contain a comma (a "Last, First" style contact, or
+  // a business name like "Acme, Inc.") or even a literal quote (a nickname
+  // like Bob "Bobby" Smith), and naively splitting on every comma, or
+  // treating every quote as a boundary, tears the address into garbage
+  // fragments — producing a header Gmail's API rejects outright rather than
+  // just mis-sending it. A backslash before a character (\" or \\) means that
+  // character is literal, not a real boundary/quote — respect that here too,
+  // so a name that's already properly escaped round-trips correctly.
+  const parts = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (ch === '\\' && i + 1 < str.length) { current += ch + str[i + 1]; i++; continue; }
+    if (ch === '"') { inQuotes = !inQuotes; current += ch; continue; }
+    if ((ch === ',' || ch === ';') && !inQuotes) { parts.push(current); current = ''; continue; }
+    current += ch;
+  }
+  if (current) parts.push(current);
+
+  return parts.map(part => {
     const p = part.trim();
     if (!p) return '';
     
     const match = p.match(/^(.*?)<(.+?)>$/);
     if (match) {
-      let name = match[1].trim().replace(/^"|"$/g, '').trim();
+      let name = match[1].trim();
+      // Strip one layer of surrounding quotes, un-escaping any \" or \\ inside
+      // so we're working with the plain display name, not its wire form.
+      if (/^".*"$/.test(name)) name = name.slice(1, -1).replace(/\\(.)/g, '$1');
       let email = match[2].trim();
       
       if (/[^\x00-\x7F]/.test(name)) name = encodeSubject(name);
-      else if (name) name = `"${name}"`;
+      else if (name) name = `"${name.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
       
       return name ? `${name} <${email}>` : `<${email}>`;
     }
@@ -251,6 +282,31 @@ function encodeAddressList(str) {
     if (/[^\x00-\x7F]/.test(p)) return encodeSubject(p);
     return p;
   }).filter(Boolean).join(', ');
+}
+
+// Same problem as encodeAddressList's splitting, but for reading rather than
+// writing: when we just need the FIRST recipient from a To/Cc list for display
+// (message list rows, the "To:" line in a sent message's detail header), a
+// naive split(',')[0] or a comma-excluding regex still cuts a comma-containing
+// display name in half (e.g. "Smith, John" <j@x.com> becomes just '"Smith').
+// Walk the string the same quote-aware way so the first real address comes out
+// whole, then also split out just its display-name portion for callers that
+// want that instead of the full "Name <email>" form.
+function parseFirstAddress(str) {
+  if (!str) return { full: '', name: '' };
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (ch === '\\' && i + 1 < str.length) { current += ch + str[i + 1]; i++; continue; }
+    if (ch === '"') { inQuotes = !inQuotes; current += ch; continue; }
+    if (ch === ',' && !inQuotes) break;
+    current += ch;
+  }
+  const full = current.trim();
+  const m = full.match(/^"?(.*?)"?\s*<.+>$/);
+  const name = m ? m[1].trim() : '';
+  return { full, name };
 }
 
 // ===== CORE INITIALIZATION =====
@@ -726,7 +782,7 @@ function attachAutocomplete(input) {
     popup.innerHTML = '';
     matches.forEach((m, idx) => {
       const item = el('div', 'ac-item', `${m.name} <${m.email}>`);
-      item.dataset.email = `"${m.name}" <${m.email}>`;
+      item.dataset.email = `"${m.name.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}" <${m.email}>`;
       item.onmousedown = (e) => { 
         e.preventDefault();
         insertMatch(item.dataset.email);
@@ -1098,7 +1154,7 @@ async function pollInbox() {
 
       const metaObj = el('div', 'email-meta');
       const displayUser = label === 'SENT'
-        ? 'To: ' + (decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(headers['To'] || ''))).split(',')[0].trim())
+        ? 'To: ' + parseFirstAddress(decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(headers['To'] || '')))).full
         : fromStr.replace(/<[^>]*>/, '').trim() || fromStr;
       const fromSpan = el('span', 'email-from', displayUser);
       if (hasAttachment) {
@@ -1372,10 +1428,8 @@ function renderEmailList(msgs, clearFirst) {
     const toStr = decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(rawTo)));
     const fromStr = decodeEntities(decodeRFC2047(fixDoubleEncodedUtf8(headers['From'] || 'Unknown')));
 
-    let sentTo = toStr;
-    const firstRecipientMatch = toStr.match(/^"?([^"<,]+)"?\s*</) || toStr.match(/^([^<,]+)/);
-    if (firstRecipientMatch) sentTo = firstRecipientMatch[1].trim().replace(/^"|"$/g, '');
-    if (!sentTo) sentTo = toStr.split(',')[0].trim();
+    const firstAddr = parseFirstAddress(toStr);
+    const sentTo = firstAddr.name || firstAddr.full;
     let displayUser = State.mail.label === 'SENT' ? 'To: ' + sentTo : fromStr.replace(/<[^>]*>/, '').trim() || fromStr;
     const ts = formatTimestamp(headers['Date']);
 
