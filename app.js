@@ -1838,6 +1838,8 @@ let cleanHtml = htmlData;
   State.reply.originalHtml = cleanHtml;
   State.reply.originalFrom = decodeEntities(headers['From'] || 'Unknown');
   State.reply.originalDate = headers['Date'] || '';
+  State.reply.originalMessageId = headers['Message-ID'] || '';
+  State.reply.originalReferences = headers['References'] || '';
 
   // Smart external image handling: block only true tracking pixels, allow legitimate content
   const parser = new DOMParser();
@@ -2911,7 +2913,7 @@ async function sendReply() {
   btn.textContent = hasLargeAttachment ? 'Sending… (may take a while)' : 'Sending…';
 
   try {
-    await sendRawEmail(to, cc, bcc, subj, body, State.reply.attachments, State.compose.currentThreadId);
+    await sendRawEmail(to, cc, bcc, subj, body, State.reply.attachments, State.compose.currentThreadId, State.reply.originalMessageId, State.reply.originalReferences);
     toggleReply(true);
     toast('Reply sent!', 'success');
     refreshCurrent();
@@ -3014,7 +3016,7 @@ async function sendEmail() {
   }
 }
 
-async function sendRawEmail(to, cc, bcc, subject, htmlBody, attachments, threadId) {
+async function sendRawEmail(to, cc, bcc, subject, htmlBody, attachments, threadId, inReplyTo = '', references = '') {
   const boundaryMixed = 'aether_mixed_' + Math.random().toString(36).substr(2);
   const boundaryRel   = 'aether_rel_'   + Math.random().toString(36).substr(2);
 
@@ -3022,6 +3024,16 @@ async function sendRawEmail(to, cc, bcc, subject, htmlBody, attachments, threadI
   if (cc)  emailStr += `Cc: ${encodeAddressList(cc)}\r\n`;
   if (bcc) emailStr += `Bcc: ${encodeAddressList(bcc)}\r\n`;
   emailStr += `Subject: ${encodeSubject(subject)}\r\n`;
+  // These are what actually make a reply thread correctly — both for Gmail's
+  // own conversation view and for any other mail client the recipient uses.
+  // In-Reply-To names the immediate parent message; References is the full
+  // ancestor chain (per RFC 5322 it should carry forward the parent's own
+  // References and append the parent's Message-ID, not just the parent alone —
+  // otherwise a long thread only ever "remembers" one hop back).
+  if (inReplyTo) {
+    emailStr += `In-Reply-To: ${inReplyTo}\r\n`;
+    emailStr += `References: ${(references ? references + ' ' : '') + inReplyTo}\r\n`;
+  }
   emailStr += `MIME-Version: 1.0\r\n`;
 
   let inlines =[];
@@ -3068,8 +3080,6 @@ async function sendRawEmail(to, cc, bcc, subject, htmlBody, attachments, threadI
     emailStr += `--${boundaryMixed}--\r\n`;
   }
   
-  if (threadId) emailStr = `Thread-Id: ${threadId}\r\n` + emailStr;
-
   const raw = utf8ToBase64url(emailStr);
   // A flat 15s timeout (fine for ordinary API calls) isn't nearly enough once
   // an attachment is involved — the whole message, attachment included, goes
@@ -3082,7 +3092,12 @@ async function sendRawEmail(to, cc, bcc, subject, htmlBody, attachments, threadI
   const estimatedMs = (raw.length / ASSUMED_MIN_UPLOAD_BYTES_PER_SEC) * 1000;
   const sendTimeoutMs = Math.min(Math.max(estimatedMs * 2, 60000), 15 * 60000); // floor 60s, cap 15min
 
-  await gapi('POST', 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send', { raw }, false, 3, 1000, sendTimeoutMs);
+  // threadId has to be its own field alongside raw in the request body — the
+  // Gmail API doesn't look for anything named "Thread-Id" inside the raw MIME
+  // content itself (that was never a real, recognized header), it only honors
+  // threadId as a sibling JSON field in the send request.
+  const sendBody = threadId ? { raw, threadId } : { raw };
+  await gapi('POST', 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send', sendBody, false, 3, 1000, sendTimeoutMs);
 }
 
 // ===== CALENDAR =====
@@ -3362,12 +3377,29 @@ function openEventModalFill(event, recurScope) {
   // Recurrence rule display
   const rrule = event?.recurrence?.[0] || '';
   const recSelect = document.getElementById('event-recurrence');
-  let matched = '';
-  for (const opt of recSelect.options) {
-    if (opt.value && rrule.startsWith(opt.value)) { matched = opt.value; break; }
+  const isInstanceOfRecurring = !!(event && event.recurringEventId && !rrule);
+  if (isInstanceOfRecurring) {
+    // A specific occurrence's own event object never carries its own
+    // .recurrence — only the master event does — so we genuinely don't know
+    // the pattern here without an extra fetch. Rather than let the dropdown
+    // default to the false "Does not repeat", show an honest placeholder and
+    // lock the field; pattern changes belong on the series itself.
+    let placeholderOpt = recSelect.querySelector('option[value="__recurring_unknown__"]');
+    if (!placeholderOpt) {
+      placeholderOpt = document.createElement('option');
+      placeholderOpt.value = '__recurring_unknown__';
+      placeholderOpt.textContent = 'Recurring (edit the series to change the pattern)';
+      recSelect.insertBefore(placeholderOpt, recSelect.firstChild);
+    }
+    recSelect.value = '__recurring_unknown__';
+  } else {
+    let matched = '';
+    for (const opt of recSelect.options) {
+      if (opt.value && opt.value !== '__recurring_unknown__' && rrule.startsWith(opt.value)) { matched = opt.value; break; }
+    }
+    recSelect.value = matched;
   }
-  recSelect.value = matched;
-  recSelect.disabled = !!(event && rrule);
+  recSelect.disabled = !!(event && rrule) || isInstanceOfRecurring;
 
   // Recurrence scope — pre-set from the picker dialog answer
   const isRecurring = !!(event && (rrule || event.recurringEventId));
@@ -3414,6 +3446,34 @@ function updateAllDayFields(isAllDay) {
   }
 }
 
+// Truncates a recurrence rule array so the series ends the day before
+// `beforeDateStr` (an ISO date or date-time string) — used for both "delete
+// this and following" and "edit this and following" (which first truncates
+// the original series, then a separate new series continues from here).
+// Two things this gets right that a naive version wouldn't:
+// - REPLACES any existing UNTIL or COUNT clause rather than skipping when one
+//   is already present. A series that already has a defined end date/count
+//   still needs to be cut short here — leaving the old limit in place would
+//   silently no-op the whole truncation for any series that isn't open-ended.
+// - Formats UNTIL to match the event's own type: a bare YYYYMMDD for an
+//   all-day (date-only) series, a UTC YYYYMMDDTHHMMSSZ for a timed one. Per
+//   RFC 5545, UNTIL's format must match DTSTART's — using the timed format on
+//   an all-day series' DTSTART is a type mismatch most calendar servers will
+//   reject.
+function truncateRecurrenceBefore(recurrenceArr, beforeDateStr, isAllDay) {
+  const untilDate = new Date(beforeDateStr);
+  untilDate.setUTCDate(untilDate.getUTCDate() - 1);
+  const pad = n => String(n).padStart(2, '0');
+  const untilStr = isAllDay
+    ? `${untilDate.getUTCFullYear()}${pad(untilDate.getUTCMonth() + 1)}${pad(untilDate.getUTCDate())}`
+    : `${untilDate.getUTCFullYear()}${pad(untilDate.getUTCMonth() + 1)}${pad(untilDate.getUTCDate())}T${pad(untilDate.getUTCHours())}${pad(untilDate.getUTCMinutes())}${pad(untilDate.getUTCSeconds())}Z`;
+  return (recurrenceArr || []).map(r => {
+    if (!r.startsWith('RRULE:')) return r; // EXDATE/RDATE/etc. — leave alone
+    const stripped = r.replace(/;(UNTIL|COUNT)=[^;]*/gi, '');
+    return stripped + ';UNTIL=' + untilStr;
+  });
+}
+
 async function saveEvent() {
   const summary = document.getElementById('event-title').value.trim();
   if (!summary) return toast('Please enter a title', 'error');
@@ -3446,7 +3506,7 @@ async function saveEvent() {
     location:    document.getElementById('event-location').value.trim() || undefined,
     description: document.getElementById('event-desc').value.trim()     || undefined,
   };
-  if (rruleVal) body.recurrence = [rruleVal];
+  if (rruleVal && rruleVal !== '__recurring_unknown__') body.recurrence = [rruleVal];
 
   let calId = State.calendar.editingEventId ? State.calendar.editingCalendarId : document.getElementById('event-calendar').value;
 
@@ -3475,13 +3535,56 @@ async function saveEvent() {
       if (isRecurring && scope !== 'all') {
         // Edit this occurrence (or this + following) via instance endpoint
         const instanceId = event.recurringEventId ? event.id : State.calendar.editingEventId;
+        const masterEventId = event.recurringEventId || State.calendar.editingEventId;
         if (scope === 'single') {
           // PATCH just this instance
           await gapi('PATCH', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${instanceId}`, body);
         } else {
-          // 'following' — set thisAndFollowing via originalStartTime
-          body.recurrenceId = event.originalStartTime?.dateTime || event.originalStartTime?.date;
-          await gapi('PATCH', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${instanceId}?modificationMode=FOLLOWING`, body);
+          // 'following' — Google Calendar's API has no single-call mechanism
+          // for this (there's no real "modificationMode" or "recurrenceId"
+          // field; an earlier version of this code assumed there was, and
+          // Google's API was silently ignoring both — applying the edit to
+          // only this one instance while still reporting full success, same
+          // as 'single' scope, just without telling you that's what happened).
+          // The correct approach, matching what Google's own client does:
+          // truncate the original series to end right before this occurrence,
+          // then create a new series carrying the edited details forward from
+          // here with the same recurrence pattern.
+          const instanceStart = event.originalStartTime?.dateTime || event.originalStartTime?.date;
+          if (!instanceStart) {
+            // No specific-occurrence anchor — we're editing the master/series
+            // itself, so "this and following" is the same as "the whole series".
+            await gapi('PATCH', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${masterEventId}`, body);
+          } else {
+            const master = await gapi('GET', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${masterEventId}`);
+            const originalRule = master.recurrence?.[0];
+            const isFirstOccurrence = (master.start?.dateTime || master.start?.date) === instanceStart;
+
+            if (isFirstOccurrence) {
+              // Editing "this and following" from the very first occurrence is
+              // the same as editing the whole series — no need to split it.
+              await gapi('PATCH', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${masterEventId}`, body);
+            } else if (!originalRule || /COUNT=/i.test(originalRule)) {
+              // A COUNT-limited series can't be safely split without fully
+              // expanding the recurrence to know how many occurrences remain —
+              // get that arithmetic wrong and the series silently gains or
+              // loses occurrences. Apply to just this occurrence instead, and
+              // say so, rather than risk corrupting the series.
+              await gapi('PATCH', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${instanceId}`, body);
+              toast('This series has a fixed number of occurrences and can\'t be safely split — only this occurrence was updated.', 'info');
+            } else {
+              const isAllDay = !master.start?.dateTime && !!master.start?.date;
+              // 1. Truncate the original series to end the day before this occurrence.
+              const truncated = truncateRecurrenceBefore(master.recurrence, instanceStart, isAllDay);
+              await gapi('PATCH', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${masterEventId}`, { recurrence: truncated });
+              // 2. Create a new series continuing the same pattern from here,
+              //    with the edited details. Reusing the original rule as-is is
+              //    correct here — it's either unbounded or has its own UNTIL
+              //    still ahead of this split point, either way still valid for
+              //    the continuing series.
+              await gapi('POST', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events`, { ...body, recurrence: [originalRule] });
+            }
+          }
         }
       } else {
         await gapi('PUT', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${State.calendar.editingEventId}`, body);
@@ -3513,19 +3616,12 @@ async function deleteEvent() {
         // Cancel just this instance by setting status to cancelled
         await gapi('PATCH', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${eventId}`, { status: 'cancelled' });
       } else if (isRecurring && scope === 'following') {
-        // Delete this and following by truncating the series
-        // Set UNTIL on the master event to the day before this occurrence
+        // Delete this and following by truncating the series to end the day
+        // before this occurrence.
         const masterEvent = await gapi('GET', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${event.recurringEventId || eventId}`);
         const occStart = event.originalStartTime?.dateTime || event.originalStartTime?.date || event.start?.dateTime || event.start?.date;
-        const untilDate = new Date(occStart);
-        untilDate.setDate(untilDate.getDate() - 1);
-        const untilStr = untilDate.toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
-        const rrules = (masterEvent.recurrence || []).map(r => {
-          if (r.startsWith('RRULE:') && !r.includes('UNTIL=') && !r.includes('COUNT=')) {
-            return r + ';UNTIL=' + untilStr;
-          }
-          return r;
-        });
+        const isAllDay = !masterEvent.start?.dateTime && !!masterEvent.start?.date;
+        const rrules = truncateRecurrenceBefore(masterEvent.recurrence, occStart, isAllDay);
         await gapi('PATCH', `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events/${masterEvent.id}`, { recurrence: rrules });
       } else {
         // Delete the whole event / series
