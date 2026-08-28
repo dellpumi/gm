@@ -240,28 +240,66 @@ function getMimeFilenameParams(filename) {
 
 function encodeAddressList(str) {
   if (!str) return '';
-  // Split on comma/semicolon, but NOT when inside a quoted display name — a
-  // contact's own name can contain a comma (a "Last, First" style contact, or
-  // a business name like "Acme, Inc.") or even a literal quote (a nickname
-  // like Bob "Bobby" Smith), and naively splitting on every comma, or
-  // treating every quote as a boundary, tears the address into garbage
-  // fragments — producing a header Gmail's API rejects outright rather than
-  // just mis-sending it. A backslash before a character (\" or \\) means that
-  // character is literal, not a real boundary/quote — respect that here too,
-  // so a name that's already properly escaped round-trips correctly.
-  const parts = [];
-  let current = '';
-  let inQuotes = false;
-  for (let i = 0; i < str.length; i++) {
-    const ch = str[i];
-    if (ch === '\\' && i + 1 < str.length) { current += ch + str[i + 1]; i++; continue; }
-    if (ch === '"') { inQuotes = !inQuotes; current += ch; continue; }
-    if ((ch === ',' || ch === ';') && !inQuotes) { parts.push(current); current = ''; continue; }
-    current += ch;
-  }
-  if (current) parts.push(current);
+  // If quotes in the raw string are unbalanced (a real typo — an opened
+  // quote for a nickname that never got closed — not a properly-escaped
+  // name), the quote-aware split below would treat everything from that
+  // stray quote onward as "inside a name", silently swallowing every
+  // following comma/semicolon and merging multiple recipients into one
+  // broken entry. Detecting that and falling back to a plain split is
+  // safer — it may mis-parse that one malformed name, but it won't
+  // silently drop every recipient that comes after it.
+  const rawQuoteCount = (str.match(/(?<!\\)"/g) || []).length;
+  const quotesAreBalanced = rawQuoteCount % 2 === 0;
 
-  return parts.map(part => {
+  let parts;
+  if (quotesAreBalanced) {
+    // Split on comma/semicolon, but NOT when inside a quoted display name — a
+    // contact's own name can contain a comma (a "Last, First" style contact, or
+    // a business name like "Acme, Inc.") or even a literal quote (a nickname
+    // like Bob "Bobby" Smith), and naively splitting on every comma, or
+    // treating every quote as a boundary, tears the address into garbage
+    // fragments — producing a header Gmail's API rejects outright rather than
+    // just mis-sending it. A backslash before a character (\" or \\) means that
+    // character is literal, not a real boundary/quote — respect that here too,
+    // so a name that's already properly escaped round-trips correctly.
+    parts = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < str.length; i++) {
+      const ch = str[i];
+      if (ch === '\\' && i + 1 < str.length) { current += ch + str[i + 1]; i++; continue; }
+      if (ch === '"') { inQuotes = !inQuotes; current += ch; continue; }
+      if ((ch === ',' || ch === ';') && !inQuotes) { parts.push(current); current = ''; continue; }
+      current += ch;
+    }
+    if (current) parts.push(current);
+  } else {
+    parts = str.split(/[,;]/);
+  }
+
+  // Some people separate multiple addresses with just a space or a pasted
+  // newline instead of a comma/semicolon — easy to do by accident, especially
+  // when composing a brand-new message and pasting in a list of addresses.
+  // That leaves one comma-less segment that actually contains multiple
+  // complete entries, which Gmail's API rejects as a single invalid address.
+  // Split each segment further on whitespace, but ONLY at safe boundaries:
+  // right after a closing '>' (a display name can't itself contain a raw
+  // '>'), or between bare emails when the segment has no angle brackets at
+  // all — never on a plain space inside "First Last <email>", since that
+  // space is a legitimate part of the display name.
+  const expandedParts = [];
+  for (const rawPart of parts) {
+    const p = rawPart.trim();
+    if (p.includes('<') && p.includes('>')) {
+      expandedParts.push(...p.split(/(?<=>)\s+(?=\S)/));
+    } else if (!p.includes('<') && /\s/.test(p) && (p.match(/@/g) || []).length > 1) {
+      expandedParts.push(...p.split(/\s+/));
+    } else {
+      expandedParts.push(rawPart);
+    }
+  }
+
+  return expandedParts.map(part => {
     const p = part.trim();
     if (!p) return '';
     
