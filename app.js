@@ -578,19 +578,30 @@ function setupEventListeners() {
       `🗑 Delete ${count}`,
       async () => {
         const ids = checked.map(cb => cb.closest('.email-item').dataset.msgId).filter(Boolean);
-        try {
-          await Promise.all(ids.map(id =>
-            gapi('POST', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}/trash`)
-          ));
+        // Promise.all rejects the whole batch the instant ANY single delete
+        // fails — which meant the DOM/state cleanup below never ran at all,
+        // even for messages that had already been successfully trashed on
+        // the server. That left the UI still showing already-deleted
+        // messages as present until a manual refresh. allSettled lets us
+        // clean up exactly the ones that actually succeeded.
+        const results = await Promise.allSettled(ids.map(id =>
+          gapi('POST', `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}/trash`)
+        ));
+        const succeededIds = ids.filter((id, i) => results[i].status === 'fulfilled');
+        const failedCount = ids.length - succeededIds.length;
+
+        succeededIds.forEach(id => {
+          document.querySelector(`.email-item[data-msg-id="${id}"]`)?.remove();
+          State.mail.items = State.mail.items.filter(m => m.id !== id);
+        });
+        updateBatchDeleteBtn();
+
+        if (failedCount === 0) {
           toast(`${count} message${count > 1 ? 's' : ''} moved to Trash`, 'success');
-          // Remove deleted items from DOM and state
-          ids.forEach(id => {
-            document.querySelector(`.email-item[data-msg-id="${id}"]`)?.remove();
-            State.mail.items = State.mail.items.filter(m => m.id !== id);
-          });
-          updateBatchDeleteBtn();
-        } catch (err) {
-          toast('Failed to delete some messages: ' + err.message, 'error');
+        } else if (succeededIds.length === 0) {
+          toast(`Failed to delete ${failedCount === 1 ? 'the message' : 'all ' + failedCount + ' messages'}: ` + results.find(r => r.status === 'rejected').reason.message, 'error');
+        } else {
+          toast(`${succeededIds.length} message${succeededIds.length > 1 ? 's' : ''} moved to Trash — ${failedCount} failed`, 'error');
         }
       },
       true
